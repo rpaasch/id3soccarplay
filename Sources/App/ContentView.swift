@@ -1,6 +1,10 @@
 //
 //  ContentView.swift
-//  ID3Maps host app (M0).
+//  ID3Maps host app.
+//
+//  Shows the car's real state (fetched from the Worker), lets you save the
+//  Worker status token once, and shows/exports the shared log (the log is how we
+//  see what Apple Maps asked the extension).
 //
 
 import SwiftUI
@@ -10,23 +14,26 @@ import Intents
 struct ContentView: View {
     @State private var profile: VehicleProfile?
     @State private var loadError: String?
+    @State private var live: VehicleState?
+    @State private var liveNote = "Henter…"
+    @State private var hasToken = SharedStore.string(.statusToken)?.isEmpty == false
+    @State private var tokenInput = ""
     @State private var entries: [LogEntry] = []
     @State private var exportURL: URL?
     @State private var showShare = false
     @State private var siriStatus = "unknown"
 
-    private let state = VehicleState.hardcodedM0()
-
     var body: some View {
         NavigationStack {
             List {
                 statusSection
+                connectionSection
                 actionSection
                 logSection
             }
-            .navigationTitle("ID.3 Maps (M0)")
-            .onAppear(perform: reload)
-            .refreshable { reload() }
+            .navigationTitle("ID.3 Maps")
+            .onAppear { reload(); Task { await refreshLive() } }
+            .refreshable { reload(); await refreshLive() }
             .sheet(isPresented: $showShare) {
                 if let url = exportURL { ShareSheet(items: [url]) }
             }
@@ -36,21 +43,41 @@ struct ContentView: View {
     // MARK: Sections
 
     private var statusSection: some View {
-        Section("Status (hardkodet)") {
+        Section("Bilens tilstand") {
+            if let s = live {
+                row("SoC", "\(Int((s.stateOfCharge * 100).rounded())) %")
+                row("Rækkevidde", s.rangeKm.map { "\(Int($0.rounded())) km" } ?? "–")
+                row("Lader", s.isCharging ? "ja" : "nej")
+                row("Målt", ageText(s.measuredAt))
+            }
+            Text(liveNote).font(.footnote).foregroundStyle(.secondary)
             if let p = profile {
-                row("Bil (rigtig)", "\(p.vehicle.realMake) \(p.vehicle.realModel) \(p.vehicle.year)")
-                row("Maskering i Maps", "\(p.vehicle.mapsMake) \(p.vehicle.mapsModel)")
-                row("SoC", "\(Int(state.stateOfCharge * 100)) %")
-                row("Rækkevidde", state.rangeKm.map { "\(Int($0)) km" } ?? "–")
-                row("Kapacitet", "\(Int(p.battery.usableCapacityWh / 1000)) kWh")
-                row("consumption model_id", "\(p.consumptionContract.modelId)")
-                row("charging model_id", "\(p.chargingContract.modelId)")
+                row("Bil i Maps", "\(p.vehicle.mapsMake) \(p.vehicle.mapsModel) (maskering)")
+                row("Kapacitet (estimat)", "\(Int(p.battery.usableCapacityWh / 1000)) kWh")
             } else if let e = loadError {
                 Text("Kunne ikke læse id3.json: \(e)").foregroundStyle(.red)
-            } else {
-                ProgressView()
             }
             row("Siri-tilladelse", siriStatus)
+        }
+    }
+
+    private var connectionSection: some View {
+        Section("Forbindelse til Workeren") {
+            if hasToken {
+                row("Status-token", "gemt ✓")
+            }
+            SecureField(hasToken ? "Nyt status-token (valgfrit)" : "Indsæt status-token", text: $tokenInput)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Button("Gem token og hent status") {
+                let t = tokenInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !t.isEmpty else { return }
+                SharedStore.setString(t, for: .statusToken)
+                SharedLog.shared.log("status token saved", category: "app")
+                tokenInput = ""
+                hasToken = true
+                Task { await refreshLive() }
+            }
         }
     }
 
@@ -58,6 +85,7 @@ struct ContentView: View {
         Section("Handlinger") {
             Button("Anmod om Siri-tilladelse") { requestSiri() }
             Button("Send testinteraktion til Maps/Siri") { donateTestInteraction() }
+            Button("Hent status nu") { Task { await refreshLive() } }
             Button("Opdater log") { reload() }
             Button("Eksportér log…") { exportLog() }
             Button("Ryd log", role: .destructive) {
@@ -86,6 +114,13 @@ struct ContentView: View {
         HStack { Text(k); Spacer(); Text(v).foregroundStyle(.secondary) }
     }
 
+    private func ageText(_ d: Date) -> String {
+        let minutes = Int(Date().timeIntervalSince(d) / 60)
+        if minutes < 1 { return "lige nu" }
+        if minutes < 90 { return "for \(minutes) min siden" }
+        return "for \(minutes / 60) t \(minutes % 60) min siden"
+    }
+
     // MARK: Actions
 
     private func reload() {
@@ -93,6 +128,27 @@ struct ContentView: View {
         catch { loadError = "\(error)" }
         entries = SharedLog.shared.entries()
         siriStatus = siriStatusText(INPreferences.siriAuthorizationStatus())
+    }
+
+    private func refreshLive() async {
+        guard SharedStore.string(.statusToken)?.isEmpty == false else {
+            liveNote = "Indsæt status-tokenet nedenfor for at hente bilens tal."
+            return
+        }
+        do {
+            let s = try await StatusClient.fetch(timeout: 8)
+            SharedStore.setCodable(s, for: .lastState)
+            live = s
+            liveNote = "Hentet fra Workeren."
+        } catch {
+            if let cached: VehicleState = SharedStore.codable(.lastState) {
+                live = cached
+                liveNote = "Workeren svarede ikke (\(error)). Viser sidste kendte måling."
+            } else {
+                liveNote = "Ingen data: \(error)"
+            }
+        }
+        entries = SharedLog.shared.entries()
     }
 
     private func requestSiri() {
@@ -128,7 +184,6 @@ struct ContentView: View {
             SharedLog.shared.log("export failed: \(error)", category: "app")
         }
     }
-
 }
 
 /// Free (nonisolated) helper so it can be called from background completion

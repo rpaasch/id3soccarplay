@@ -2,9 +2,8 @@
 //  VehicleState.swift
 //  ID3Maps — shared.
 //
-//  The battery snapshot the extension reports to Maps. In M0 this is HARD-CODED
-//  (SoC 60 %). In M2 the provider will read the latest snapshot from the
-//  Cloudflare Worker / App-Group cache and apply the estimation layer.
+//  The battery snapshot the extension reports to Maps. Comes from the Worker
+//  (Smartcar) via `StatusClient`; M0's hard-coded 60 % is gone.
 //
 
 import Foundation
@@ -20,15 +19,4 @@ struct VehicleState: Sendable, Codable {
     var rangeKm: Double?
     /// Minutes to full while charging, if known.
     var minutesToFull: Int?
-
-    /// Fixed M0 snapshot: 60 %, measured "2 minutes ago", not charging.
-    static func hardcodedM0() -> VehicleState {
-        VehicleState(
-            stateOfCharge: 0.60,
-            measuredAt: Date().addingTimeInterval(-120),
-            isCharging: false,
-            rangeKm: 255,          // ~0.60 * 425 WLTP, rough
-            minutesToFull: nil
-        )
-    }
 }
