@@ -242,14 +242,17 @@ async function oauthStart(request, env) {
   if (!env.SMARTCAR_APPLICATION_ID) return new Response("SMARTCAR_APPLICATION_ID not set", { status: 503 });
   const origin = new URL(request.url).origin;
   const params = new URLSearchParams({
-    response_type: "none",
+    response_type: "none", // hosted flow; data arrives via webhook, not a callback
     application_id: env.SMARTCAR_APPLICATION_ID,
-    redirect_uri: `${origin}/oauth/callback`,
     scope: SC_SCOPE,
     mode: env.SMARTCAR_MODE || "live",
     external_id: "id3maps",
-    state: "id3maps",
   });
+  // Only add our callback if a redirect URI has been registered in Smartcar.
+  if (env.SMARTCAR_USE_REDIRECT === "1") {
+    params.set("response_type", "none");
+    params.set("redirect_uri", `${origin}/oauth/callback`);
+  }
   return Response.redirect(`${SC_CONNECT}?${params.toString()}`, 302);
 }
 
