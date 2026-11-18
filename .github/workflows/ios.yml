@@ -1,0 +1,85 @@
+name: iOS build
+
+on:
+  push:
+    branches:
+      - main
+      - claude/apple-maps-vw-id3-ev-qf6bdn
+    paths:
+      - "Sources/**"
+      - "Resources/**"
+      - "project.yml"
+      - "Config/**"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+    inputs:
+      sign:
+        description: "Also build a signed Ad Hoc IPA (requires signing secrets)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Always-on compile check. No signing material needed — validates that the
+  # app + extension compile under Swift 6 strict concurrency on the macOS runner.
+  compile:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select latest stable Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+
+      - name: Show toolchain
+        run: xcodebuild -version && swift --version
+
+      - name: Cache Homebrew XcodeGen
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/Homebrew/downloads
+          key: brew-xcodegen-${{ runner.os }}
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ID3Maps.xcodeproj \
+            -scheme ID3Maps \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build | xcpretty || xcodebuild \
+            -project ID3Maps.xcodeproj -scheme ID3Maps -configuration Release \
+            -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+
+  # Signed Ad Hoc IPA. Enabled once the signing bundle + Cloudflare host exist.
+  # Guarded so it does not run (and burn 10x macOS minutes) until opted in.
+  adhoc:
+    needs: compile
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.sign }}
+    runs-on: macos-15
+    timeout-minutes: 40
+    permissions:
+      id-token: write   # OIDC token used to fetch the signing bundle from the Worker
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Placeholder
+        run: |
+          echo "Signed Ad Hoc build is wired up in M0 once ASC keys + Cloudflare"
+          echo "are provided. See scripts/ and worker/. Intentionally a no-op now."
+          exit 1

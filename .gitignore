@@ -1,0 +1,24 @@
+# Xcode / build
+*.xcodeproj
+build/
+DerivedData/
+*.ipa
+*.dSYM.zip
+.DS_Store
+
+# Signing material — never commit
+Config/Signing.xcconfig
+*.p12
+*.p8
+*.mobileprovision
+*.cer
+*.certSigningRequest
+signing/
+
+# Cloudflare
+worker/node_modules/
+worker/.wrangler/
+.dev.vars
+
+# Node
+node_modules/
