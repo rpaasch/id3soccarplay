@@ -5,6 +5,7 @@ options:
     iOS: "17.0"
   createIntermediateGroups: true
   defaultConfig: Release
+  generateEmptyDirectories: true
 
 configs:
   Debug: debug
@@ -20,9 +21,9 @@ settings:
     CODE_SIGN_STYLE: Manual
     TARGETED_DEVICE_FAMILY: "1,2"
     ENABLE_USER_SCRIPT_SANDBOXING: YES
+    # Use our hand-written Info.plist / entitlements verbatim — never generate.
+    GENERATE_INFOPLIST_FILE: NO
   configs:
-    # Signing is injected by CI via Config/Signing.xcconfig (gitignored).
-    # Locally/unsigned CI builds leave these empty and pass CODE_SIGNING_ALLOWED=NO.
     Release:
       SWIFT_OPTIMIZATION_LEVEL: "-O"
     Debug:
@@ -34,19 +35,19 @@ targets:
     platform: iOS
     sources:
       - path: Sources/App
+        excludes:
+          - Info.plist
+          - App.entitlements
       - path: Sources/Shared
       - path: Resources/id3.json
         buildPhase: resources
-    info:
-      path: Sources/App/Info.plist
-    entitlements:
-      path: Sources/App/App.entitlements
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.porsche.one
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         PRODUCT_NAME: ID3Maps
+        INFOPLIST_FILE: Sources/App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Sources/App/App.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     dependencies:
       - target: ID3Extension
         embed: true
@@ -56,14 +57,15 @@ targets:
     platform: iOS
     sources:
       - path: Sources/Extension
+        excludes:
+          - Info.plist
+          - Extension.entitlements
       - path: Sources/Shared
       - path: Resources/id3.json
         buildPhase: resources
-    info:
-      path: Sources/Extension/Info.plist
-    entitlements:
-      path: Sources/Extension/Extension.entitlements
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.porsche.one.extension
         PRODUCT_NAME: ID3Extension
+        INFOPLIST_FILE: Sources/Extension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Sources/Extension/Extension.entitlements
