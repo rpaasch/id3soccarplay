@@ -27,6 +27,8 @@ struct ModelHints: Sendable, Codable {
     var learnedKm: Double?
     var chargePowerScale: Double?
     var temperatureC: Double?
+    /// The temperature the baseline charging curve is calibrated for (scale x1.00).
+    var referenceTempC: Double?
     /// Learned DC power (kW) at SoC 0, 10 … 100 % for the current temperature band;
     /// nil entries are not learned yet and fall back to baseline x scale.
     var chargeCurveKw: [Double?]?

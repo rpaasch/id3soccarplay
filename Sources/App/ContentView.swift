@@ -8,6 +8,7 @@
 //
 
 import SwiftUI
+import Charts
 import UIKit
 import Intents
 
@@ -27,6 +28,7 @@ struct ContentView: View {
         NavigationStack {
             List {
                 statusSection
+                chargeCurveSection
                 connectionSection
                 actionSection
                 logSection
@@ -60,7 +62,9 @@ struct ContentView: View {
                     }
                     if m.consumptionSource == "learned", let km = m.learnedKm { row("Lært over", "\(Int(km)) km") }
                     if let t = m.temperatureC { row("Udetemperatur", String(format: "%.1f °C", t)) }
-                    if let x = m.chargePowerScale { row("Ladeeffekt vs. reference", String(format: "×%.2f", x)) }
+                    if let x = m.chargePowerScale {
+                        row("Ladeeffekt", String(format: "×%.2f (×1,00 = kurven ved %.0f °C)", x, m.referenceTempC ?? 6))
+                    }
                     let bins = (m.chargeCurveKw ?? []).compactMap { $0 }.count
                     row("Ladekurve", bins > 0 ? "lært: \(bins)/11 punkter (\(m.chargeSessions ?? 0) ladninger)" : "endnu ikke lært")
                 }
@@ -72,6 +76,37 @@ struct ContentView: View {
                 Text("Kunne ikke læse id3.json: \(e)").foregroundStyle(.red)
             }
             row("Siri-tilladelse", siriStatus)
+        }
+    }
+
+    private var chargeCurveSection: some View {
+        Section("Ladekurve (det Maps får)") {
+            if let p = profile {
+                let points = curvePoints(profile: p, hints: live?.model)
+                if points.isEmpty {
+                    Text("Ingen kurve.").foregroundStyle(.secondary)
+                } else {
+                    Chart(points) { pt in
+                        LineMark(x: .value("Batteriniveau", pt.soc), y: .value("kW", pt.kw))
+                            .foregroundStyle(.gray)
+                        PointMark(x: .value("Batteriniveau", pt.soc), y: .value("kW", pt.kw))
+                            .foregroundStyle(pt.learned ? Color.green : Color.gray)
+                    }
+                    .chartXScale(domain: 0...100)
+                    .chartXAxisLabel("Batteriniveau (%)")
+                    .chartYAxisLabel("kW")
+                    .frame(height: 200)
+                    let capacityKwh = p.adjusted(with: live?.model).profile.battery.usableCapacityWh / 1000
+                    if let m = chargeMinutes(from: 10, to: 80, points: points, capacityKwh: capacityKwh) {
+                        row("10 → 80 %", "ca. \(Int(m.rounded())) min")
+                    }
+                    if let peak = points.map(\.kw).max() {
+                        row("Spids", "\(Int(peak.rounded())) kW")
+                    }
+                    Text("Grønne punkter er lært af dine egne hurtigladninger. Grå er estimater (kurven ved 6 °C, justeret efter udetemperaturen).")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
@@ -154,6 +189,9 @@ struct ContentView: View {
             SharedStore.setCodable(s, for: .lastState)
             live = s
             liveNote = "Hentet fra Workeren."
+            if Date().timeIntervalSince(s.measuredAt) > 1800 && !s.isCharging {
+                liveNote += " Tidspunktet er, hvornår bilen sidst meldte til VW. Det er normalt, når den holder parkeret."
+            }
         } catch {
             if let cached: VehicleState = SharedStore.codable(.lastState) {
                 live = cached
@@ -219,4 +257,49 @@ struct ShareSheet: UIViewControllerRepresentable {
         UIActivityViewController(activityItems: items, applicationActivities: nil)
     }
     func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
+}
+
+
+// MARK: - Charging curve helpers
+
+private struct CurvePoint: Identifiable {
+    let id: Int
+    let soc: Double      // percent
+    let kw: Double
+    let learned: Bool
+}
+
+/// The curve exactly as Maps receives it (baseline adapted with the live hints).
+private func curvePoints(profile: VehicleProfile, hints: ModelHints?) -> [CurvePoint] {
+    let params = profile.adjusted(with: hints).profile.chargingContract.vehicleParameters
+    guard let energy = params.numbers("vehicle_energy_axis_wh"),
+          let watts = params.numbers("vehicle_charge_axis_w"),
+          energy.count == watts.count, let capacity = energy.last, capacity > 0
+    else { return [] }
+    let learned = hints?.chargeCurveKw ?? []
+    return energy.indices.map { i in
+        CurvePoint(id: i, soc: energy[i] / capacity * 100, kw: watts[i] / 1000,
+                   learned: i < learned.count && learned[i] != nil)
+    }
+}
+
+/// Minutes to charge from `a` % to `b` % along the curve (linear interpolation).
+private func chargeMinutes(from a: Double, to b: Double, points: [CurvePoint], capacityKwh: Double) -> Double? {
+    guard points.count > 1, b > a else { return nil }
+    func power(at soc: Double) -> Double {
+        for i in 1..<points.count where soc <= points[i].soc {
+            let p0 = points[i - 1], p1 = points[i]
+            let f = p1.soc == p0.soc ? 0 : (soc - p0.soc) / (p1.soc - p0.soc)
+            return p0.kw + (p1.kw - p0.kw) * f
+        }
+        return points.last?.kw ?? 1
+    }
+    let steps = 70
+    var minutes = 0.0
+    for s in 0..<steps {
+        let s0 = a + (b - a) * Double(s) / Double(steps)
+        let s1 = a + (b - a) * Double(s + 1) / Double(steps)
+        minutes += (s1 - s0) / 100 * capacityKwh / max(power(at: (s0 + s1) / 2), 1) * 60
+    }
+    return minutes
 }
