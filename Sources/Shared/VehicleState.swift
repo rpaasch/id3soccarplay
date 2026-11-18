@@ -22,4 +22,6 @@ struct VehicleState: Sendable, Codable {
     /// Dynamic hints from the Worker (capacity, consumption, temperature). Optional:
     /// without them the baseline profile in id3.json is used unchanged.
     var model: ModelHints?
+    /// "ac" or "dc" while charging, if known.
+    var chargeKind: String?
 }

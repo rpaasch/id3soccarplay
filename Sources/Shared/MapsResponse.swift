@@ -93,7 +93,7 @@ enum MapsPowerResponse {
         // Charging.
         response.charging = state.isCharging
         if state.isCharging {
-            response.activeConnector = .ccs2
+            response.activeConnector = state.chargeKind == "ac" ? .mennekes : .ccs2
             if let m = state.minutesToFull { response.minutesToFull = m }
         }
 

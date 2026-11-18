@@ -430,7 +430,7 @@ async function pollSmartcar(env, retried) {
   const prevSnap = await env.STATE.get("snapshot", "json");
   const wantWatt = prevSnap?.charging === true; // power is only meaningful while charging
   const skipTemp = !!(await env.STATE.get("temp_unavailable"));
-  const [soc, range, chg, cap, odo, watt, temp] = await Promise.all([
+  const [soc, range, chg, cap, odo, watt, temp, energy, ttc, conn] = await Promise.all([
     scSignal(token, v, "tractionbattery-stateofcharge"),
     scSignal(token, v, "tractionbattery-range"),
     scSignal(token, v, "charge-ischarging"),
@@ -438,6 +438,9 @@ async function pollSmartcar(env, retried) {
     scSignal(token, v, "odometer-traveleddistance"), // ERROR until the owner grants the permission
     wantWatt ? scSignal(token, v, "charge-wattage") : Promise.resolve(null),
     skipTemp ? Promise.resolve(null) : scSignal(token, v, "climate-externaltemperature"),
+    wantWatt ? scSignal(token, v, "charge-energyadded") : Promise.resolve(null),
+    wantWatt ? scSignal(token, v, "charge-timetocomplete") : Promise.resolve(null),
+    wantWatt ? scSignal(token, v, "charge-chargingconnectortype") : Promise.resolve(null),
   ]);
   if (temp) {
     const tv = temp.attrs?.body;
@@ -472,6 +475,14 @@ async function pollSmartcar(env, retried) {
     snap.odometerKm = odo.attrs.body.unit === "miles" ? odo.attrs.body.value * 1.609344 : odo.attrs.body.value;
   }
   if (watt?.attrs?.status?.value === "SUCCESS" && typeof watt.attrs.body?.value === "number") snap.wattageW = watt.attrs.body.value;
+  if (energy?.attrs?.status?.value === "SUCCESS" && typeof energy.attrs.body?.value === "number") {
+    snap.energyAddedKwh = energy.attrs.body.unit === "wh" ? energy.attrs.body.value / 1000 : energy.attrs.body.value;
+  }
+  if (ttc?.attrs?.status?.value === "SUCCESS" && typeof ttc.attrs.body?.value === "number" && ttc.attrs.body.value > 0) {
+    snap.minutesToFull = Math.round(ttc.attrs.body.value);
+  }
+  if (conn?.attrs?.status?.value === "SUCCESS" && typeof conn.attrs.body?.value === "string") snap.connector = conn.attrs.body.value;
+  if (snap.charging) snap.chargeKind = classifyCharge(snap.connector, snap.wattageW);
   await storeSnapshotIfNewer(env, snap);
   await env.STATE.put("last_poll_error", "");
   return snap;
@@ -567,14 +578,24 @@ async function learnCharging(env, snap, tempC) {
     sess = sess || { startedAt: snap.measuredAt, maxKw: 0, samples: [], band: tempBand(tempC) };
     const last = sess.samples[sess.samples.length - 1];
     if (last && last.t >= snap.measuredAt) return;
-    sess.samples.push({ t: snap.measuredAt, soc: snap.soc, kw: Math.round(kw * 10) / 10 });
+    const sample = { t: snap.measuredAt, soc: snap.soc, kw: Math.round(kw * 10) / 10 };
+    if (typeof snap.energyAddedKwh === "number") sample.kwh = snap.energyAddedKwh;
+    sess.samples.push(sample);
     sess.maxKw = Math.max(sess.maxKw, kw);
+    if (snap.connector && snap.connector !== "invalid") {
+      sess.connector = snap.connector;
+      const seen = (await env.STATE.get("connectors_seen", "json")) || {};
+      seen[snap.connector] = (seen[snap.connector] || 0) + 1;
+      await env.STATE.put("connectors_seen", JSON.stringify(seen));
+    }
     await env.STATE.put("charge_session", JSON.stringify(sess));
     return;
   }
   if (snap.charging === false && sess) { // session ended
     await env.STATE.delete("charge_session");
-    if (sess.maxKw < DC_MIN_KW || sess.samples.length < 3) return; // AC or too short to learn from
+    await checkCapacity(env, sess);
+    const kind = classifyCharge(sess.connector, sess.maxKw * 1000);
+    if (kind !== "dc" || sess.samples.length < 3) return; // AC or too short to learn a curve from
     const key = `learn_charge_${sess.band}`;
     const data = (await env.STATE.get(key, "json")) || { bins: Array.from({ length: 11 }, () => []), sessions: 0 };
     for (const sm of sess.samples) {
@@ -586,6 +607,34 @@ async function learnCharging(env, snap, tempC) {
     data.updated = Date.now();
     await env.STATE.put(key, JSON.stringify(data));
   }
+}
+
+// AC or DC? Smartcar's connector names are only known once we have seen a session,
+// so the raw values are logged (/learn -> connectorsSeen). Rule: a connector that
+// clearly says AC wins; otherwise DC means "DC connector AND more than AC can deliver";
+// without a usable connector value, power alone decides (> 12 kW is DC).
+function classifyCharge(connector, wattageW) {
+  const c = String(connector || "").toLowerCase();
+  const kw = typeof wattageW === "number" ? wattageW / 1000 : null;
+  const dcName = /ccs|chademo|combo|dc|supercharger|gbt/.test(c);
+  const acName = /type ?2|type ?1|j1772|mennekes|schuko|\bac\b/.test(c) && !dcName;
+  if (acName) return "ac";
+  if (kw == null) return dcName ? "dc" : null;
+  return kw >= DC_MIN_KW ? "dc" : "ac";
+}
+
+// Sanity check of the battery size: energy the car says it added / SoC gained.
+// Logged only (never applied): it may be measured at the charger, i.e. include losses.
+async function checkCapacity(env, sess) {
+  const withE = sess.samples.filter((x) => typeof x.kwh === "number");
+  if (withE.length < 2) return;
+  const a = withE[0], b = withE[withE.length - 1];
+  const dSoc = b.soc - a.soc, dE = b.kwh - a.kwh;
+  if (dSoc < 0.10 || dE < 3) return;
+  const list = (await env.STATE.get("capacity_checks", "json")) || [];
+  list.push({ at: b.t, kind: classifyCharge(sess.connector, sess.maxKw * 1000), dSocPct: Math.round(dSoc * 100),
+    energyKwh: Math.round(dE * 10) / 10, impliedKwh: Math.round((dE / dSoc) * 10) / 10 });
+  await env.STATE.put("capacity_checks", JSON.stringify(list.slice(-20)));
 }
 
 function percentile(arr, p) {
@@ -620,6 +669,8 @@ async function learnEndpoint(request, env) {
     consumption: await env.STATE.get("learn_cons", "json"),
     chargeSession: await env.STATE.get("charge_session", "json"),
     learnError: (await env.STATE.get("learn_error")) || null,
+    connectorsSeen: await env.STATE.get("connectors_seen", "json"),
+    capacityChecks: await env.STATE.get("capacity_checks", "json"),
     chargeBands: {},
   };
   const list = await env.STATE.list({ prefix: "learn_charge_" });

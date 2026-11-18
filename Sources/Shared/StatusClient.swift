@@ -22,6 +22,10 @@ private struct RemoteStatus: Decodable {
     let measuredAt: Double?
     let lastError: String?
     let model: ModelHints?
+    /// Minutes to full while charging (Smartcar `TimeToComplete`).
+    let minutesToFull: Double?
+    /// "ac" or "dc" while charging.
+    let chargeKind: String?
 }
 
 enum StatusError: Error, CustomStringConvertible {
@@ -58,8 +62,10 @@ enum StatusClient {
             measuredAt: Date(timeIntervalSince1970: ms / 1000),
             isCharging: status.charging ?? false,
             rangeKm: status.rangeKm,
-            minutesToFull: nil,
-            model: status.model
+            minutesToFull: (status.charging == true ? status.minutesToFull : nil)
+                .flatMap { $0 > 0 ? Int($0.rounded()) : nil },
+            model: status.model,
+            chargeKind: status.charging == true ? status.chargeKind : nil
         )
     }
 }

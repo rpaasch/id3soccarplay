@@ -47,7 +47,10 @@ struct ContentView: View {
             if let s = live {
                 row("SoC", "\(Int((s.stateOfCharge * 100).rounded())) %")
                 row("Rækkevidde", s.rangeKm.map { "\(Int($0.rounded())) km" } ?? "–")
-                row("Lader", s.isCharging ? "ja" : "nej")
+                row("Lader", s.isCharging
+                    ? "ja" + (s.chargeKind.map { " (\($0.uppercased()))" } ?? "")
+                        + (s.minutesToFull.map { ", \($0) min til fuld" } ?? "")
+                    : "nej")
                 row("Målt", ageText(s.measuredAt))
                 if let m = s.model {
                     if let c = m.capacityKwhNet { row("Batteri (netto)", "\(Int(c)) kWh") }
