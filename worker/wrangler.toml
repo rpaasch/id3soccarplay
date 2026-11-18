@@ -1,0 +1,23 @@
+name = "id3"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+
+# KV for the latest vehicle snapshot and the webhook freshness log.
+# Create with: wrangler kv namespace create STATE   (then paste the id here)
+# [[kv_namespaces]]
+# binding = "STATE"
+# id = "REPLACE_ME"
+
+# R2 for hosting the signed IPA + manifest + install page.
+# Create with: wrangler r2 bucket create id3-dist
+# [[r2_buckets]]
+# binding = "DIST"
+# bucket_name = "id3-dist"
+
+# Secrets (set with `wrangler secret put <NAME>`, never in git):
+#   SMARTCAR_CLIENT_SECRET   Smartcar app client secret
+#   SMARTCAR_AMT             Smartcar Application Management Token (webhook HMAC key)
+#   STATUS_TOKEN             bearer token guarding GET /status
+#   DL_PATH                  secret path segment for /dl/<DL_PATH>/...
+#   UDID_PATH                secret path segment for /udid/<UDID_PATH>
+#   CI_AUDIENCE              expected OIDC audience for the signing endpoint
