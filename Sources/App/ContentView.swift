@@ -51,9 +51,15 @@ struct ContentView: View {
                 row("Målt", ageText(s.measuredAt))
                 if let m = s.model {
                     if let c = m.capacityKwhNet { row("Batteri (netto)", "\(Int(c)) kWh") }
-                    if let k = m.consumptionKwhPer100 { row("Forbrug (bilens estimat)", String(format: "%.1f kWh/100 km", k)) }
+                    if let k = m.consumptionKwhPer100 {
+                        let label = m.consumptionSource == "learned" ? "Forbrug (lært)" : "Forbrug (bilens estimat)"
+                        row(label, String(format: "%.1f kWh/100 km", k))
+                    }
+                    if m.consumptionSource == "learned", let km = m.learnedKm { row("Lært over", "\(Int(km)) km") }
                     if let t = m.temperatureC { row("Udetemperatur", String(format: "%.1f °C", t)) }
                     if let x = m.chargePowerScale { row("Ladeeffekt vs. reference", String(format: "×%.2f", x)) }
+                    let bins = (m.chargeCurveKw ?? []).compactMap { $0 }.count
+                    row("Ladekurve", bins > 0 ? "lært: \(bins)/11 punkter (\(m.chargeSessions ?? 0) ladninger)" : "endnu ikke lært")
                 }
             }
             Text(liveNote).font(.footnote).foregroundStyle(.secondary)

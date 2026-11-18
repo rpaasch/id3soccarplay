@@ -22,8 +22,15 @@ import Foundation
 struct ModelHints: Sendable, Codable {
     var capacityKwhNet: Double?
     var consumptionKwhPer100: Double?
+    /// "learned" (real driving, from odometer + SoC) or "car-estimate".
+    var consumptionSource: String?
+    var learnedKm: Double?
     var chargePowerScale: Double?
     var temperatureC: Double?
+    /// Learned DC power (kW) at SoC 0, 10 … 100 % for the current temperature band;
+    /// nil entries are not learned yet and fall back to baseline x scale.
+    var chargeCurveKw: [Double?]?
+    var chargeSessions: Int?
 }
 
 extension JSONObject {
@@ -36,6 +43,24 @@ extension JSONObject {
                 return item
             })
         }
+        return JSONObject(fields: f)
+    }
+
+    /// The numbers in the array under `key` (nil if absent or not all numeric).
+    func numbers(_ key: String) -> [Double]? {
+        guard case .array(let items)? = fields[key] else { return nil }
+        var out: [Double] = []
+        for item in items {
+            guard case .number(let n) = item else { return nil }
+            out.append(n)
+        }
+        return out
+    }
+
+    /// Copy with the array under `key` replaced by `values`.
+    func replacingArray(_ key: String, with values: [Double]) -> JSONObject {
+        var f = fields
+        f[key] = .array(values.map { .number($0) })
         return JSONObject(fields: f)
     }
 
@@ -79,7 +104,9 @@ extension VehicleProfile {
             // Wh per metre == kWh per km, so x100 gives kWh/100 km.
             let factor = min(1.5, max(0.8, implied / (baselineWhPerM * 100)))
             consumptionParams = consumptionParams.scalingArray("vehicle_consumption_values_wh_per_m", by: factor)
-            notes.append(String(format: "consumption %.1f kWh/100km (x%.2f)", implied, factor))
+            let source = hints.consumptionSource == "learned"
+                ? "learned over \(Int(hints.learnedKm ?? 0)) km" : "car estimate"
+            notes.append(String(format: "consumption %.1f kWh/100km (x%.2f, ", implied, factor) + source + ")")
         }
 
         // Charging power: baseline is for ~6 °C; the Worker supplies the temperature scale.
@@ -88,6 +115,21 @@ extension VehicleProfile {
             chargeParams = chargeParams.scalingArray("vehicle_charge_axis_w", by: s)
             notes.append(String(format: "charge power x%.2f", s)
                 + (hints.temperatureC.map { String(format: " (%.1f °C)", $0) } ?? ""))
+        }
+
+        // Learned DC curve overrides the baseline per SoC decile where we have real data.
+        if let curve = hints.chargeCurveKw, curve.count == 11,
+           let base = chargeParams.numbers("vehicle_charge_axis_w"), base.count == 11 {
+            var merged = base
+            var learnedBins = 0
+            for i in 0..<11 {
+                if let kw = curve[i] {
+                    merged[i] = min(250, max(5, kw)) * 1000
+                    learnedBins += 1
+                }
+            }
+            chargeParams = chargeParams.replacingArray("vehicle_charge_axis_w", with: merged)
+            notes.append("charge curve learned (\(learnedBins)/11 bins, \(hints.chargeSessions ?? 0) sessions)")
         }
 
         let adjusted = VehicleProfile(
