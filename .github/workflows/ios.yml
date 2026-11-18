@@ -23,6 +23,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # TEMP diagnostic: confirms Actions runs at all on this account (Linux is free
+  # and always available). Remove once macOS runners are confirmed working.
+  ping-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "linux runner OK on $(uname -a)"
+
   # Always-on compile check. No signing material needed — validates that the
   # app + extension compile under Swift 6 strict concurrency on the macOS runner.
   compile:
