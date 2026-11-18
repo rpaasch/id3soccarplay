@@ -66,20 +66,179 @@ jobs:
             -destination 'generic/platform=iOS' -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
 
-  # Signed Ad Hoc IPA. Enabled once the signing bundle + Cloudflare host exist.
-  # Guarded so it does not run (and burn 10x macOS minutes) until opted in.
+  # Signed Ad Hoc IPA, published to GitHub Pages as an itms-services install page.
+  # Runs only on manual dispatch with sign=true, and needs the SIGNING_BUNDLE_B64
+  # secret (base64 of a tar.gz with dist.p12 + id3.mobileprovision + p12-password.txt).
   adhoc:
     needs: compile
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.sign }}
     runs-on: macos-latest
     timeout-minutes: 40
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     permissions:
-      id-token: write   # OIDC token used to fetch the signing bundle from the Worker
       contents: read
+      pages: write
+      id-token: write
+    env:
+      TEAM_ID: XY6GZ256WA
+      PROFILE_NAME: ID3 Ad Hoc
+      APP_BUNDLE_ID: com.porsche.one
+      EXT_BUNDLE_ID: com.porsche.one.extension
+      PAGES_BASE: https://rpaasch.github.io/id3soccarplay
     steps:
       - uses: actions/checkout@v4
-      - name: Placeholder
+
+      - name: Guard — signing secret present
         run: |
-          echo "Signed Ad Hoc build is wired up in M0 once ASC keys + Cloudflare"
-          echo "are provided. See scripts/ and worker/. Intentionally a no-op now."
-          exit 1
+          if [ -z "${{ secrets.SIGNING_BUNDLE_B64 }}" ]; then
+            echo "::error::SIGNING_BUNDLE_B64 secret is not set. Add it in repo Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
+      - name: Select latest stable Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Unpack signing material
+        env:
+          SIGNING_BUNDLE_B64: ${{ secrets.SIGNING_BUNDLE_B64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/sign"
+          echo "$SIGNING_BUNDLE_B64" | base64 --decode > "$RUNNER_TEMP/sign/bundle.tgz"
+          tar -xzf "$RUNNER_TEMP/sign/bundle.tgz" -C "$RUNNER_TEMP/sign"
+          ls -1 "$RUNNER_TEMP/sign"
+
+      - name: Create keychain and import certificate
+        run: |
+          set -euo pipefail
+          KC="$RUNNER_TEMP/build.keychain-db"
+          P12_PW="$(cat "$RUNNER_TEMP/sign/p12-password.txt")"
+          security create-keychain -p actions "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p actions "$KC"
+          security import "$RUNNER_TEMP/sign/dist.p12" -P "$P12_PW" -A -t cert -f pkcs12 -k "$KC"
+          security list-keychains -d user -s "$KC" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple: -s -k actions "$KC" >/dev/null
+          security find-identity -v -p codesigning "$KC"
+
+      - name: Install provisioning profile
+        run: |
+          set -euo pipefail
+          PROF="$RUNNER_TEMP/sign/id3.mobileprovision"
+          UUID="$(security cms -D -i "$PROF" | plutil -extract UUID raw -)"
+          DEST="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$DEST"
+          cp "$PROF" "$DEST/$UUID.mobileprovision"
+          echo "Installed profile $UUID"
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Archive (Release, manual signing)
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project ID3Maps.xcodeproj -scheme ID3Maps -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/ID3Maps.xcarchive" \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $RUNNER_TEMP/build.keychain-db" \
+            archive
+
+      - name: Export Ad Hoc IPA
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>release-testing</string>
+            <key>teamID</key><string>$TEAM_ID</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>signingCertificate</key><string>Apple Distribution</string>
+            <key>provisioningProfiles</key><dict>
+              <key>$APP_BUNDLE_ID</key><string>$PROFILE_NAME</string>
+              <key>$EXT_BUNDLE_ID</key><string>$PROFILE_NAME</string>
+            </dict>
+            <key>compileBitcode</key><false/>
+            <key>stripSwiftSymbols</key><true/>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/ID3Maps.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/export" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $RUNNER_TEMP/build.keychain-db"
+          ls -la "$RUNNER_TEMP/export"
+
+      - name: Assemble install site
+        run: |
+          set -euo pipefail
+          SITE="$RUNNER_TEMP/site"
+          mkdir -p "$SITE"
+          IPA="$(ls "$RUNNER_TEMP/export"/*.ipa | head -1)"
+          cp "$IPA" "$SITE/app.ipa"
+          VER="0.1.0 (build ${{ github.run_number }})"
+          cat > "$SITE/manifest.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict><key>items</key><array><dict>
+            <key>assets</key><array><dict>
+              <key>kind</key><string>software-package</string>
+              <key>url</key><string>$PAGES_BASE/app.ipa</string>
+            </dict></array>
+            <key>metadata</key><dict>
+              <key>bundle-identifier</key><string>$APP_BUNDLE_ID</string>
+              <key>bundle-version</key><string>0.1.0</string>
+              <key>kind</key><string>software</string>
+              <key>title</key><string>VW ID.3 Maps</string>
+            </dict>
+          </dict></array></dict></plist>
+          PLIST
+          cat > "$SITE/index.html" <<HTML
+          <!doctype html><html lang="da"><head><meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>Installér VW ID.3 Maps</title>
+          <style>
+            :root{color-scheme:light dark}
+            body{font-family:-apple-system,system-ui,sans-serif;max-width:32rem;margin:0 auto;padding:2rem 1rem;line-height:1.5}
+            .btn{display:block;text-align:center;background:#0a84ff;color:#fff;text-decoration:none;
+                 padding:1rem;border-radius:12px;font-size:1.2rem;font-weight:600;margin:1.5rem 0}
+            code{background:#8884;padding:.1em .3em;border-radius:4px}
+            .muted{color:#8a8a8a;font-size:.9rem}
+          </style></head><body>
+          <h1>VW ID.3 Maps</h1>
+          <p>Ad Hoc-build $VER. Åbn denne side i <b>Safari på iPhonen</b>.</p>
+          <a class="btn" href="itms-services://?action=download-manifest&amp;url=$PAGES_BASE/manifest.plist">Installér appen</a>
+          <p class="muted">Efter installation: Indstillinger → Generelt → VPN og enhedsadministration →
+          stol på udvikleren, før du åbner appen første gang.</p>
+          </body></html>
+          HTML
+          ls -la "$SITE"
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/site
+
+      - name: Deploy to Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
+
+      - name: Install link
+        run: |
+          echo "### ✅ Installér VW ID.3 Maps" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Åbn på iPhonen i Safari: <$PAGES_BASE/>" >> "$GITHUB_STEP_SUMMARY"
