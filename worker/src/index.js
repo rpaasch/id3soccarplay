@@ -429,14 +429,27 @@ async function pollSmartcar(env, retried) {
   const needCap = !(await env.STATE.get("sc_capacity"));
   const prevSnap = await env.STATE.get("snapshot", "json");
   const wantWatt = prevSnap?.charging === true; // power is only meaningful while charging
-  const [soc, range, chg, cap, odo, watt] = await Promise.all([
+  const skipTemp = !!(await env.STATE.get("temp_unavailable"));
+  const [soc, range, chg, cap, odo, watt, temp] = await Promise.all([
     scSignal(token, v, "tractionbattery-stateofcharge"),
     scSignal(token, v, "tractionbattery-range"),
     scSignal(token, v, "charge-ischarging"),
     needCap ? scSignal(token, v, "tractionbattery-nominalcapacity") : Promise.resolve(null),
     scSignal(token, v, "odometer-traveleddistance"), // ERROR until the owner grants the permission
     wantWatt ? scSignal(token, v, "charge-wattage") : Promise.resolve(null),
+    skipTemp ? Promise.resolve(null) : scSignal(token, v, "climate-externaltemperature"),
   ]);
+  if (temp) {
+    const tv = temp.attrs?.body;
+    if (temp.attrs?.status?.value === "SUCCESS" && typeof tv?.value === "number") {
+      const c = String(tv.unit || "").toLowerCase().startsWith("f") ? (tv.value - 32) * 5 / 9 : tv.value;
+      const when = Date.parse(temp.meta?.oemUpdatedAt || "");
+      await env.STATE.put("car_temp", JSON.stringify({ t: Math.round(c * 10) / 10, at: isNaN(when) ? Date.now() : when }));
+    } else {
+      // Not enabled / not permitted / car can't report it: don't ask again for 30 min.
+      await env.STATE.put("temp_unavailable", "1", { expirationTtl: 1800 });
+    }
+  }
   if (cap && cap.attrs?.body && typeof cap.attrs.body.capacity === "number") {
     // Gross kWh as selected in Smartcar Connect (e.g. 82 for an ID.3 Pro S).
     await env.STATE.put("sc_capacity", String(cap.attrs.body.capacity), { expirationTtl: 86400 });
@@ -495,7 +508,7 @@ async function netCapacityKwh(env) {
 
 async function learn(env, snap) {
   try {
-    const t = await outdoorTemp(env, null);
+    const t = (await outdoorTempInfo(env, null)).t;
     await learnConsumption(env, snap, t);
     await learnCharging(env, snap, t);
   } catch (e) {
@@ -645,6 +658,13 @@ async function refreshWeather(env) {
   } catch { return null; }
 }
 
+async function outdoorTempInfo(env, ctx) {
+  const car = await env.STATE.get("car_temp", "json");
+  if (car && Date.now() - car.at < 3 * 3600 * 1000) return { t: car.t, source: "car" };
+  const t = await outdoorTemp(env, ctx);
+  return { t, source: "weather" };
+}
+
 async function outdoorTemp(env, ctx) {
   const c = await env.STATE.get("weather", "json");
   if (c && Date.now() - c.at < WEATHER_TTL_MS) return c.t;
@@ -660,9 +680,11 @@ async function buildModel(env, snap, ctx) {
   const net = Math.round(gross * 0.94);
   const model = { capacityKwhNet: net, referenceTempC: REF_TEMP_C };
 
-  const t = await outdoorTemp(env, ctx);
+  const ti = await outdoorTempInfo(env, ctx);
+  const t = ti.t;
   if (typeof t === "number") {
     model.temperatureC = Math.round(t * 10) / 10;
+    model.temperatureSource = ti.source; // "car" (the car's own thermometer) or "weather"
     const scale = Math.min(2.0, Math.max(0.55, 1 + 0.08 * (t - REF_TEMP_C)));
     model.chargePowerScale = Math.round(scale * 20) / 20; // steps of 0.05: keeps Maps from re-routing on noise
   }
