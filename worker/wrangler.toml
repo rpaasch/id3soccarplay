@@ -11,6 +11,7 @@ id = "335ac8e5f6c34183a6eaeea409f412a7"
 [vars]
 GH_REPO = "rpaasch/id3soccarplay"
 OIDC_AUDIENCE = "id3maps-ci"
+SMARTCAR_MODE = "live"
 
 # Secrets (set with `wrangler secret put`):
 #   SIGNING_BUNDLE_B64  base64 tar.gz of dist.p12 + id3.mobileprovision + p12-password.txt
