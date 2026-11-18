@@ -83,7 +83,7 @@ jobs:
           if [ "$code" != "200" ]; then
             echo "::error::Worker /ci/signing returned $code"; cat "$RUNNER_TEMP/sign/bundle.b64"; exit 1
           fi
-          base64 --decode "$RUNNER_TEMP/sign/bundle.b64" > "$RUNNER_TEMP/sign/bundle.tgz"
+          base64 --decode < "$RUNNER_TEMP/sign/bundle.b64" > "$RUNNER_TEMP/sign/bundle.tgz"
           tar -xzf "$RUNNER_TEMP/sign/bundle.tgz" -C "$RUNNER_TEMP/sign"
           ls -1 "$RUNNER_TEMP/sign"
 
