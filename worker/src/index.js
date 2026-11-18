@@ -546,6 +546,7 @@ async function learnConsumption(env, snap, tempC) {
   const dKm = cur.odo - prev.odo;
   let dSoc = prev.soc - cur.soc;
   if (dSoc < 0 && dSoc >= -0.02) dSoc = 0; // up to 2 pp "rise" = regen / rounding jitter, not a charge
+  await learnSpeed(env, { dKm, dSoc, dt: cur.t - prev.t, charging: prev.charging || cur.charging }, tempC);
   const parkedOrBad = prev.charging || cur.charging || dKm < 0.5 || dKm > 600 || dSoc < -0.005 || dSoc > 0.6
     || cur.t - prev.t > 36 * 3600 * 1000;
   let pending = await env.STATE.get("learn_pending", "json");
@@ -570,6 +571,44 @@ async function learnConsumption(env, snap, tempC) {
   if (b.km > 600) { b.kwh *= 0.8; b.km *= 0.8; } // forget old driving slowly
   all[pending.band] = b;
   await env.STATE.put("learn_cons", JSON.stringify(all));
+}
+
+// Consumption by driving speed. Measurements arrive every ~2 min while driving, so
+// consecutive intervals are pooled into ~6 min windows (odometer is whole km), then
+// classified by the window's average speed and added to that class's totals.
+const SPEED_WIN_MS = 6 * 60 * 1000;
+const SPEED_GAP_MS = 12 * 60 * 1000;
+
+function speedClass(kmh) { return kmh < 55 ? "city" : kmh < 95 ? "road" : "motorway"; }
+
+async function learnSpeed(env, iv, tempC) {
+  let w = await env.STATE.get("learn_speed_win", "json");
+  if (iv.charging || iv.dt <= 0 || iv.dt > SPEED_GAP_MS || iv.dKm < 0 || iv.dKm > 60 || iv.dSoc < 0) {
+    if (w) await env.STATE.delete("learn_speed_win");
+    return;
+  }
+  const net = await netCapacityKwh(env);
+  w = w || { kwh: 0, km: 0, ms: 0, band: tempBand(tempC) };
+  w.kwh += iv.dSoc * net; w.km += iv.dKm; w.ms += iv.dt;
+  if (w.ms < SPEED_WIN_MS) { await env.STATE.put("learn_speed_win", JSON.stringify(w)); return; }
+  await env.STATE.delete("learn_speed_win");
+  if (w.km < 3) return; // standing still or parked: nothing to learn from
+  const cls = speedClass(w.km / (w.ms / 3600000));
+  const all = (await env.STATE.get("learn_cons_speed", "json")) || {};
+  const band = (all[w.band] = all[w.band] || {});
+  const c = (band[cls] = band[cls] || { kwh: 0, km: 0, ms: 0 });
+  c.kwh += w.kwh; c.km += w.km; c.ms += w.ms;
+  if (c.km > 400) { c.kwh *= 0.8; c.km *= 0.8; c.ms *= 0.8; }
+  await env.STATE.put("learn_cons_speed", JSON.stringify(all));
+}
+
+async function learnedSpeedConsumption(env, tempC) {
+  const band = ((await env.STATE.get("learn_cons_speed", "json")) || {})[tempBand(tempC)];
+  const out = {};
+  for (const [cls, c] of Object.entries(band || {})) {
+    if (c.km >= 15) out[cls] = { kwhPer100: Math.round((c.kwh / c.km) * 1000) / 10, km: Math.round(c.km), avgKmh: Math.round(c.km / (c.ms / 3600000)) };
+  }
+  return out;
 }
 
 async function learnedConsumption(env, tempC) {
@@ -694,6 +733,7 @@ async function learnEndpoint(request, env) {
     anchor: await env.STATE.get("learn_anchor", "json"),
     pending: await env.STATE.get("learn_pending", "json"),
     consumption: await env.STATE.get("learn_cons", "json"),
+    consumptionBySpeedRaw: await env.STATE.get("learn_cons_speed", "json"),
     chargeSession: await env.STATE.get("charge_session", "json"),
     learnError: (await env.STATE.get("learn_error")) || null,
     recentMeasurements: ((await env.STATE.get("measure_log", "json")) || []).slice(-15),
@@ -787,6 +827,8 @@ async function buildModel(env, snap, ctx) {
     model.consumptionTrim = trim;
     model.consumptionKwhPer100 = Math.round(model.consumptionKwhPer100 * trim * 10) / 10;
   }
+  const bySpeed = await learnedSpeedConsumption(env, t);
+  if (Object.keys(bySpeed).length) model.consumptionBySpeed = bySpeed;
   const cc = await learnedChargeCurve(env, t);
   if (cc) { model.chargeCurveKw = cc.curveKw; model.chargeSessions = cc.sessions; }
   return model;
