@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "note": "ID.3 Pro S 77 kWh net (2022) -- capacity/range/curve are ESTIMATES from public figures; maps_make/model masquerade as Porsche/Taycan per VirtualGarage Siri allowlist (see docs/M-1).",
+  "note": "ID.3 Pro S 77 kWh net (2022). Capacity/range are estimates from public figures. Charging curve is a COLD-BATTERY (Danish winter, no preconditioning) estimate calibrated to ~50-55 min for 10->80 %; a warm battery charges faster. maps_make/model masquerade as Porsche/Taycan (see docs/M-1).",
   "vehicle": {
     "real_make": "Volkswagen",
     "real_model": "ID.3 Pro S",
@@ -62,17 +62,17 @@
         77000
       ],
       "vehicle_charge_axis_w": [
-        110000,
-        160000,
-        165000,
-        150000,
-        130000,
-        115000,
-        100000,
-        85000,
-        65000,
         40000,
-        10000
+        55000,
+        65000,
+        70000,
+        70000,
+        66000,
+        58000,
+        50000,
+        40000,
+        24000,
+        8000
       ],
       "energy_w_per_h": [
         0,
