@@ -336,8 +336,10 @@ async function smartcarWebhook(request, env) {
 async function storeSnapshotIfNewer(env, snap) {
   const cur = await env.STATE.get("snapshot", "json");
   if (cur && cur.measuredAt && snap.measuredAt && cur.measuredAt > snap.measuredAt) return false;
+  // Same measurement again (polls while parked): nothing new, so spend no KV writes (free tier: 1000/day).
+  if (cur && cur.measuredAt === snap.measuredAt && ["soc", "charging", "wattageW", "odometerKm", "rangeKm", "minutesToFull", "chargeKind", "connector"]
+      .every(k => cur[k] === snap[k])) return false;
   await env.STATE.put("snapshot", JSON.stringify(snap));
-  await env.STATE.put("snapshot_log", JSON.stringify({ at: Date.now(), soc: snap.soc, source: snap.source }));
   await learn(env, snap);
   return true;
 }
@@ -452,7 +454,11 @@ async function pollSmartcar(env, retried) {
     if (temp.attrs?.status?.value === "SUCCESS" && typeof tv?.value === "number") {
       const c = String(tv.unit || "").toLowerCase().startsWith("f") ? (tv.value - 32) * 5 / 9 : tv.value;
       const when = Date.parse(temp.meta?.oemUpdatedAt || "");
-      await env.STATE.put("car_temp", JSON.stringify({ t: Math.round(c * 10) / 10, at: isNaN(when) ? Date.now() : when }));
+      const rounded = Math.round(c * 10) / 10;
+      const prevTemp = await env.STATE.get("car_temp", "json");
+      if (!prevTemp || prevTemp.t !== rounded) {
+        await env.STATE.put("car_temp", JSON.stringify({ t: rounded, at: isNaN(when) ? Date.now() : when }));
+      }
     } else {
       // Not enabled / not permitted / car can't report it: don't ask again for 30 min.
       await env.STATE.put("temp_unavailable", "1", { expirationTtl: 1800 });
@@ -489,7 +495,7 @@ async function pollSmartcar(env, retried) {
   if (conn?.attrs?.status?.value === "SUCCESS" && typeof conn.attrs.body?.value === "string") snap.connector = conn.attrs.body.value;
   if (snap.charging) snap.chargeKind = classifyCharge(snap.connector, snap.wattageW);
   await storeSnapshotIfNewer(env, snap);
-  await env.STATE.put("last_poll_error", "");
+  if (await env.STATE.get("last_poll_error")) await env.STATE.put("last_poll_error", "");
   return snap;
 }
 
@@ -844,7 +850,9 @@ async function statusEndpoint(request, env, ctx) {
   let snap = await env.STATE.get("snapshot", "json");
   const lastPoll = Number((await env.STATE.get("last_poll_at")) || 0);
   const force = url.searchParams.get("refresh") === "1";
-  const due = force || Date.now() - lastPoll > POLL_MIN_INTERVAL_MS;
+  // Fresh or charging: poll often. Parked with old data: every 15 min is plenty (saves KV writes).
+  const active = snap && (snap.charging === true || Date.now() - (snap.measuredAt || 0) < 15 * 60 * 1000);
+  const due = force || Date.now() - lastPoll > (active ? POLL_MIN_INTERVAL_MS : 15 * 60 * 1000);
 
   if (due) {
     if (!snap || force) {
