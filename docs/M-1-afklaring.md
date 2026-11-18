@@ -217,3 +217,27 @@ Whitelisten rammer sandsynligvis `INCar.make`/`model`, ikke bundle-ID'et. Derfor
 - **Variant B (Taycan-maskering):** make/model = Porsche / Taycan, som evmaps. Eneste konfiguration med teoretisk chance. Åbent spørgsmål: bruger Maps så vores ID.3-formula-argumenter, eller Apples egen Taycan-model? Kan **kun** afgøres i bilen.
 
 Revideret skøn for *brugbar* ID.3-routing: 10–15 %. Reserve ved fejl: ABRP i CarPlay med live SoC fra Smartcar-delen (M1), som er genbrugbar uanset udfald.
+
+---
+
+## 8. VirtualGarage-symbolerne (iOS 26/27) — mekanismen bekræftet
+
+Analyse af symboldumps fra `VirtualGarage.framework` (til stede i både iOS 26.5 og 27.0 beta). **Der er ingen hardkodet mærke-/modelliste i binæren; allowlisten loades som en ressource/manifest** (muligvis server-leveret eller opdateret med iOS). Relevante symboler:
+
+- **To separate allowlist-veje:**
+  - **Siri (vores vej):** config-nøgler `VirtualGarageConfig_EVRoutingManifestKeyNameForSiriBundleID`, `…ForSiriAllowListedModelIDs`, `…ForSiriAllowlist`.
+  - **iAP2 (egmp's vej):** `…ForIApAllowlist`, `…ForIApDenylist`, `…ForIApDenyListedModelID/FirmwareID/Model/Year`.
+- **Typer/metoder:** `VGExternalAccessoryModelFilter allowsVehicleWithModelId:firmwareId:year:model:`, `_initializeAllowAndDenylists`, `VGAllowlistPayload`, `VGDenylistEntry`, `_modelIdAllowlist`, `_allowedFormulaIDs`, `_isConnectedVehicleAllowlisted`, `VGOEMApplication initWithBundleIdentifier:allowPlaceholder:error:`, `VGVehicle … manufacturer/model/siriIntentsIdentifier`, `VGDataCoordinator _loadAllOEMVehiclesForApps:`.
+- **Knapper:** `VirtualGarageConfig_EVRoutingEnableAllowListing`, `…ResourceNameForAllowAndDenylists`, `…KeyNameForModelID`.
+
+### Konsekvenser (afgør projektets rammer)
+
+1. **Siri-vejen gates på bundle-ID + tilladte model-ID'er samtidig.** Derfor bruger evmaps både `com.porsche.one` og Porsches `model_id` 12582912/12582916. Begge skal matche Apples manifest.
+2. **Plan A er død.** Et unikt `com.porsche.<navn>` kommer aldrig på Siri-bundle-ID-allowlisten. **Kun eksakt `com.porsche.one`** har en chance → kun plan B (Ad Hoc). TestFlight og App Store Connect-posten droppes.
+3. **Vi skal bruge Porsches model-ID'er**, ikke egne.
+4. **Uafklaret (kun M0 i bilen kan svare):**
+   - a) Tjekkes kun bundle-ID-**strengen**, eller også kodesignatur/team? Kun strengen → tricket virker. Team → umuligt.
+   - b) `_allowedFormulaIDs` antyder, at formlen er bundet til model-ID'et. Bruger Maps så vores ID.3-tal eller Apples egen Taycan-model?
+5. **make/model = Porsche/Taycan** i `INCar` (maskering), med ID.3-tal i formula-argumenterne.
+
+Dette forenkler projektet: ingen ASC-app-post, ingen TestFlight, kun Ad Hoc-signering.
