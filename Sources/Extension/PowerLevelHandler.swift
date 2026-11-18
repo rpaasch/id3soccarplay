@@ -7,10 +7,16 @@
 //  Worker is unreachable the last cached real measurement is used. If there is
 //  no real data at all we answer `.failure` rather than invent a number.
 //
-//  While Maps is subscribed (navigation), a background task re-reads the state
+//  While Maps is subscribed (navigation), ONE background loop re-reads the state
 //  every minute and pushes an update only when it matters: SoC moved by at least
-//  one percentage point, charging toggled, or a newer measurement arrived. (Maps
-//  recalculates the route on every push, so we keep pushes rare.)
+//  one percentage point, charging toggled, the dynamic numbers moved ~5 %, or a
+//  newer measurement arrived. Maps recalculates the route on every push, so we
+//  keep pushes rare.
+//
+//  Maps creates a NEW handler object for every intent, so a stop request often
+//  arrives on a different instance than the start. The loop therefore lives in a
+//  process-wide coordinator, not in the handler (an earlier per-instance version
+//  leaked loops and pushed every update twice).
 //
 
 import Intents
@@ -19,8 +25,6 @@ import Intents
 private struct UnsafeBox<T>: @unchecked Sendable { let value: T }
 
 final class PowerLevelHandler: NSObject, INGetCarPowerLevelStatusIntentHandling, @unchecked Sendable {
-    private let lock = NSLock()
-    private var updateTask: Task<Void, Never>?
 
     // MARK: One-shot query
 
@@ -51,45 +55,19 @@ final class PowerLevelHandler: NSObject, INGetCarPowerLevelStatusIntentHandling,
         to observer: INGetCarPowerLevelStatusIntentResponseObserver
     ) {
         SharedLog.shared.log("startSendingUpdates (Maps subscribed)", category: "power")
-        let box = UnsafeBox(value: observer)
-
-        let task = Task { [self] in
-            var lastPushed: VehicleState?
-            while !Task.isCancelled {
-                if let profile = try? VehicleProfile.load(), let current = await StateProvider.current() {
-                    let s = current.state
-                    if Self.shouldPush(new: s, last: lastPushed) {
-                        let adjusted = profile.adjusted(with: s.model)
-                        box.value.didUpdate(getCarPowerLevelStatus: MapsPowerResponse.make(state: s, profile: adjusted.profile))
-                        lastPushed = s
-                        SharedLog.shared.log(
-                            "push -> SoC \(Int((s.stateOfCharge * 100).rounded()))% (\(current.origin.rawValue)); model: \(adjusted.note)",
-                            category: "power"
-                        )
-                    }
-                }
-                try? await Task.sleep(for: .seconds(60))
-            }
-        }
-        lock.lock()
-        updateTask?.cancel()
-        updateTask = task
-        lock.unlock()
+        UpdateCoordinator.shared.start(observer)
     }
 
     func stopSendingUpdates(for intent: INGetCarPowerLevelStatusIntent) {
         SharedLog.shared.log("stopSendingUpdates", category: "power")
-        lock.lock()
-        updateTask?.cancel()
-        updateTask = nil
-        lock.unlock()
+        UpdateCoordinator.shared.stop()
     }
 
     // MARK: Push rule
 
     /// Push the first state, then only on >= 1 percentage point, a charging
-    /// change, or a newer real measurement.
-    private static func shouldPush(new: VehicleState, last: VehicleState?) -> Bool {
+    /// change, a ~5 % move in the dynamic numbers, or a newer real measurement.
+    fileprivate static func shouldPush(new: VehicleState, last: VehicleState?) -> Bool {
         guard let last else { return true }
         if abs(new.stateOfCharge - last.stateOfCharge) >= 0.01 { return true }
         if new.isCharging != last.isCharging { return true }
@@ -107,5 +85,65 @@ final class PowerLevelHandler: NSObject, INGetCarPowerLevelStatusIntentHandling,
         return differs(a?.consumptionKwhPer100, b?.consumptionKwhPer100)
             || differs(a?.chargePowerScale, b?.chargePowerScale)
             || differs(a?.capacityKwhNet, b?.capacityKwhNet)
+    }
+}
+
+/// The single live-update loop of this extension process.
+///
+/// `start` replaces any previous subscription (a new Maps subscription supersedes the
+/// old one); `stop` ends it. A generation counter makes a superseded loop exit on its
+/// own, so there can never be two loops pushing at once.
+private final class UpdateCoordinator: @unchecked Sendable {
+    static let shared = UpdateCoordinator()
+
+    private let lock = NSLock()
+    private var task: Task<Void, Never>?
+    private var observer: UnsafeBox<INGetCarPowerLevelStatusIntentResponseObserver>?
+    private var generation = 0
+
+    func start(_ observer: INGetCarPowerLevelStatusIntentResponseObserver) {
+        lock.lock()
+        defer { lock.unlock() }
+        generation += 1
+        let mine = generation
+        self.observer = UnsafeBox(value: observer)
+        task?.cancel()
+        task = Task { await self.run(generation: mine) }
+    }
+
+    func stop() {
+        lock.lock()
+        defer { lock.unlock() }
+        generation += 1
+        task?.cancel()
+        task = nil
+        observer = nil
+    }
+
+    private func currentObserver(for generation: Int) -> UnsafeBox<INGetCarPowerLevelStatusIntentResponseObserver>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return generation == self.generation ? observer : nil
+    }
+
+    private func run(generation: Int) async {
+        var lastPushed: VehicleState?
+        while !Task.isCancelled {
+            guard currentObserver(for: generation) != nil else { return } // superseded or stopped
+            if let profile = try? VehicleProfile.load(), let current = await StateProvider.current() {
+                let s = current.state
+                if PowerLevelHandler.shouldPush(new: s, last: lastPushed),
+                   let target = currentObserver(for: generation) {
+                    let adjusted = profile.adjusted(with: s.model)
+                    target.value.didUpdate(getCarPowerLevelStatus: MapsPowerResponse.make(state: s, profile: adjusted.profile))
+                    lastPushed = s
+                    SharedLog.shared.log(
+                        "push -> SoC \(Int((s.stateOfCharge * 100).rounded()))% (\(current.origin.rawValue)); model: \(adjusted.note)",
+                        category: "power"
+                    )
+                }
+            }
+            try? await Task.sleep(for: .seconds(60))
+        }
     }
 }

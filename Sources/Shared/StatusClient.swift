@@ -46,7 +46,17 @@ enum StatusClient {
     static let url = URL(string: "https://id3.78fvr47qyz.workers.dev/status")!
 
     /// Fetches the current state from the Worker. Short timeout: Maps is waiting.
+    /// A dropped connection (-1005, common when an extension was just resumed) is retried once.
     static func fetch(timeout: TimeInterval = 3) async throws -> VehicleState {
+        do {
+            return try await fetchOnce(timeout: timeout)
+        } catch let error as URLError where error.code == .networkConnectionLost {
+            try await Task.sleep(for: .milliseconds(300))
+            return try await fetchOnce(timeout: timeout)
+        }
+    }
+
+    private static func fetchOnce(timeout: TimeInterval) async throws -> VehicleState {
         guard let token = SharedStore.string(.statusToken), !token.isEmpty else { throw StatusError.noToken }
         var request = URLRequest(url: url, timeoutInterval: timeout)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
