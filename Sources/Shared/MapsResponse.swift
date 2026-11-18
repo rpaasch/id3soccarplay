@@ -16,12 +16,10 @@ enum MapsCar {
     static let identifier = UUID(uuidString: "1D300000-0000-4000-A000-000000000003")!
 
     static func connectorType(_ raw: String) -> INCar.ChargingConnectorType {
+        // The ID.3 only has Type 2 (AC) + CCS2 (DC). Keep the mapping to the two
+        // connector constants we actually use; anything else falls back to CCS2.
         switch raw.lowercased() {
         case "mennekes", "type2": return .mennekes
-        case "ccs2": return .ccs2
-        case "ccs1": return .ccs1
-        case "chademo": return .chademo
-        case "j1772": return .j1772
         default: return .ccs2
         }
     }
