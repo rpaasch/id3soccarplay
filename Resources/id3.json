@@ -1,19 +1,19 @@
 {
   "schema_version": 1,
-  "note": "ID.3 Pro 58 kWh usable \u2014 ESTIMATES. User confirms battery/year. maps_make/model masquerade as Porsche/Taycan per VirtualGarage Siri allowlist (see docs/M-1).",
+  "note": "ID.3 Pro S 77 kWh net (2022) -- capacity/range/curve are ESTIMATES from public figures; maps_make/model masquerade as Porsche/Taycan per VirtualGarage Siri allowlist (see docs/M-1).",
   "vehicle": {
     "real_make": "Volkswagen",
-    "real_model": "ID.3",
-    "year": 2021,
+    "real_model": "ID.3 Pro S",
+    "year": 2022,
     "maps_make": "Porsche",
     "maps_model": "Taycan",
     "display_name": "VW ID.3"
   },
   "battery": {
-    "usable_capacity_wh": 58000
+    "usable_capacity_wh": 77000
   },
   "range": {
-    "wltp_km": 425
+    "wltp_km": 550
   },
   "connectors": [
     {
@@ -22,7 +22,7 @@
     },
     {
       "type": "ccs2",
-      "max_power_kw": 120
+      "max_power_kw": 170
     }
   ],
   "consumption_contract": {
@@ -30,16 +30,16 @@
     "vehicle_parameters": {
       "vehicle_auxiliary_power_w": 500.0,
       "vehicle_consumption_values_wh_per_m": [
-        0.195,
-        0.15,
-        0.16,
-        0.178,
-        0.148,
-        0.148,
-        0.158,
-        0.18,
-        0.205,
-        0.235
+        0.2,
+        0.155,
+        0.165,
+        0.184,
+        0.153,
+        0.153,
+        0.163,
+        0.186,
+        0.212,
+        0.243
       ],
       "vehicle_altitude_gain_consumption_wh_per_m": 7.5,
       "vehicle_altitude_loss_consumption_wh_per_m": 5.5
@@ -50,52 +50,52 @@
     "vehicle_parameters": {
       "vehicle_energy_axis_wh": [
         0,
-        5800,
-        11600,
-        17400,
-        23200,
-        29000,
-        34800,
-        40600,
-        46400,
-        52200,
-        58000
+        7700,
+        15400,
+        23100,
+        30800,
+        38500,
+        46200,
+        53900,
+        61600,
+        69300,
+        77000
       ],
       "vehicle_charge_axis_w": [
-        100000,
-        120000,
         110000,
+        160000,
+        165000,
+        150000,
+        130000,
+        115000,
         100000,
-        95000,
-        80000,
-        60000,
-        50000,
-        35000,
-        22000,
-        8000
+        85000,
+        65000,
+        40000,
+        10000
       ],
       "energy_w_per_h": [
         0,
-        2887,
-        5774,
-        8661,
-        11548,
-        14435,
-        17322,
-        20209,
-        23096,
-        25983,
-        28870,
-        31756,
-        34643,
-        37530,
-        40417,
-        43304,
-        46191,
-        49078,
-        51965,
-        54852,
-        57739
+        3833,
+        7665,
+        11498,
+        15331,
+        19164,
+        22996,
+        26829,
+        30662,
+        34494,
+        38327,
+        42160,
+        45992,
+        49825,
+        53658,
+        57490,
+        61323,
+        65156,
+        68989,
+        72821,
+        76654
       ],
       "efficiency_factor": 0.9
     }
