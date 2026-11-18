@@ -198,3 +198,22 @@ Rækkefølgen er vigtig. Hvert punkt slutter med, hvad du skal give mig tilbage.
 
 ### F. GitHub
 16. Intet at gøre. Repoet `rpaasch/id3soccarplay` er allerede koblet på sessionen, og signeringen hentes via OIDC (se afsnit 5). Beslut dog, om repoet skal være privat (cirka 25–35 builds/md gratis) eller offentligt (ubegrænset).
+
+---
+
+## 7. Efterprøvning: virker app-tricket for andre end forfatteren? (research 2026-11-18)
+
+**Konklusion: ingen uafhængig bekræftelse fundet. Stærke indicier for, at whitelisten er server-side på make/model, ikke på bundle-ID.**
+
+- **Apples udviklerforum (tråd 653328, 2020–2024):** flere udviklere implementerer de samme intents; bilen dukker aldrig op i Maps. Apple kaldte det i okt. 2020 en bug (FB8760513). Opfølgninger i 2021, 2022, 2023 og feb. 2024: "still not working". Ingen succesrapport.
+- **Apples udviklerforum (tråd 772132, jan. 2025):** udvikler bygger "aftermarket solution … for any EV", efterlyser virkende formula-argumenter. Intet svar med et virkende eksempel.
+- **openautolink #190 (okt. 2026) — vigtigste bevis:** mossyhub fik en opdigtet bil ("OAL Test EV") til at *vises* i Apple Maps, men: *"stopped short of actual battery/EV info because it has explicit car Make/Model fields"* og *"something Apple server side that only certain cars work."* → At vise bilen er muligt; EV-data er gated server-side på **make/model**.
+- **evmaps-forks:** kun RangeBridge (juli–aug. 2026) hævder at intents virker, og skriver at app-ID'erne *"intentionally remain Porsche IDs for Apple Maps compatibility"*. Fork-forfatterens egen påstand, uden screenshots eller uafhængig bekræftelse. Har fejlsektion "Maps does not show the vehicle option". De øvrige tre forks tilføjer ingen testrapport.
+- **iOS 26/27:** Apple har et privat framework **VirtualGarage**, der håndterer bil-/EV-routing-data. Ikke analyseret færdig.
+
+### Konsekvens for M0 — ny hypotese
+Whitelisten rammer sandsynligvis `INCar.make`/`model`, ikke bundle-ID'et. Derfor testes to varianter:
+- **Variant A (ærlig):** make/model = Volkswagen / ID.3. Virker kun, hvis VW er på Apples serverliste — næsten sikkert ikke.
+- **Variant B (Taycan-maskering):** make/model = Porsche / Taycan, som evmaps. Eneste konfiguration med teoretisk chance. Åbent spørgsmål: bruger Maps så vores ID.3-formula-argumenter, eller Apples egen Taycan-model? Kan **kun** afgøres i bilen.
+
+Revideret skøn for *brugbar* ID.3-routing: 10–15 %. Reserve ved fejl: ABRP i CarPlay med live SoC fra Smartcar-delen (M1), som er genbrugbar uanset udfald.
