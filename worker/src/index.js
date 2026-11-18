@@ -701,9 +701,11 @@ async function cronTick(env) {
   const snap = await env.STATE.get("snapshot", "json");
   if (!snap || snap.charging !== true) return;
   const lastPoll = Number((await env.STATE.get("last_poll_at")) || 0);
-  const dc = (snap.wattageW || 0) / 1000 >= DC_MIN_KW;
-  // DC: every ~5 min (Smartcar's VW data refreshes every 4-5 min). AC: only every ~30 min.
-  if (Date.now() - lastPoll < (dc ? 4.5 : 28) * 60 * 1000) return;
+  // Unknown wattage at charging start counts as possibly DC, so the first minutes of a
+  // fast charge are sampled. Only a known low power (AC) slows polling to ~30 min.
+  const knownAc = snap.wattageW != null && snap.wattageW / 1000 < DC_MIN_KW;
+  // DC/unknown: every ~5 min (Smartcar's VW data refreshes every 4-5 min). AC: every ~30 min.
+  if (Date.now() - lastPoll < (knownAc ? 28 : 4.5) * 60 * 1000) return;
   await pollSafely(env);
 }
 
