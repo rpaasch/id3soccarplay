@@ -30,6 +30,10 @@ export default {
       if (p === "/ci/signing") return ciSigning(request, env);
       if (p === "/ci/upload") return ciUpload(request, env);
       if (p === "/icon.png") return servePng(env);
+      if (p === "/oauth/start") return oauthStart(request, env);
+      if (p === "/oauth/callback") return oauthCallback(request, env);
+      if (p === "/smartcar/webhook") return smartcarWebhook(request, env);
+      if (p === "/status") return statusEndpoint(request, env);
       if (p === "/health") return new Response("ok", { status: 200 });
       return new Response("Not found", { status: 404 });
     } catch (e) {
@@ -224,4 +228,169 @@ function servePng() {
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return new Response(bytes, { headers: { "content-type": "image/png", "cache-control": "public, max-age=86400" } });
+}
+
+// ---------- Smartcar OAuth + webhook (M1) ----------
+
+const SC_CONNECT = "https://connect.smartcar.com/oauth/authorize";
+const SC_TOKEN = "https://auth.smartcar.com/oauth/token";
+const SC_SCOPE = "read_battery read_charge read_vehicle_info";
+
+async function oauthStart(request, env) {
+  if (!env.SMARTCAR_CLIENT_ID) return new Response("SMARTCAR_CLIENT_ID not set", { status: 503 });
+  const origin = new URL(request.url).origin;
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: env.SMARTCAR_CLIENT_ID,
+    scope: SC_SCOPE,
+    redirect_uri: `${origin}/oauth/callback`,
+    mode: env.SMARTCAR_MODE || "live",
+    state: "id3maps",
+  });
+  return Response.redirect(`${SC_CONNECT}?${params.toString()}`, 302);
+}
+
+async function oauthCallback(request, env) {
+  const url = new URL(request.url);
+  const code = url.searchParams.get("code");
+  const err = url.searchParams.get("error");
+  if (err) return htmlMsg("Afvist", `Smartcar returnerede: ${err}`);
+  if (!code) return htmlMsg("Mangler kode", "Ingen autorisationskode i callback.");
+  if (!env.SMARTCAR_CLIENT_SECRET) return new Response("SMARTCAR_CLIENT_SECRET not set", { status: 503 });
+
+  const basic = btoa(`${env.SMARTCAR_CLIENT_ID}:${env.SMARTCAR_CLIENT_SECRET}`);
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: `${url.origin}/oauth/callback`,
+  });
+  const res = await fetch(SC_TOKEN, {
+    method: "POST",
+    headers: { Authorization: `Basic ${basic}`, "content-type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+  const txt = await res.text();
+  if (!res.ok) return htmlMsg("Token-fejl", `HTTP ${res.status}: ${txt.slice(0, 300)}`);
+  const tok = JSON.parse(txt);
+  const store = {
+    access_token: tok.access_token,
+    refresh_token: tok.refresh_token,
+    expires_at: Date.now() + (tok.expires_in || 7200) * 1000,
+    connected_at: Date.now(),
+  };
+  await env.STATE.put("smartcar_tokens", JSON.stringify(store));
+  return htmlMsg("Forbundet ✅", "Din VW ID.3 er nu koblet til. Du kan lukke denne side. Næste skridt er at tilføje en webhook i Smartcar-dashboardet.");
+}
+
+function htmlMsg(title, msg) {
+  return new Response(
+    `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<div style="font-family:-apple-system,system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem">` +
+    `<h1>${title}</h1><p>${msg}</p></div>`,
+    { headers: { "content-type": "text/html; charset=utf-8" } }
+  );
+}
+
+async function hmacHex(key, msg) {
+  const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(key),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(msg));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function smartcarWebhook(request, env) {
+  if (request.method !== "POST") return new Response("POST only", { status: 405 });
+  const amt = env.SMARTCAR_AMT;
+  if (!amt) return new Response("SMARTCAR_AMT not set", { status: 503 });
+  const raw = await request.text();
+  let evt;
+  try { evt = JSON.parse(raw); } catch { return new Response("bad json", { status: 400 }); }
+
+  // VERIFY handshake: echo HMAC of the challenge.
+  if (evt.eventType === "VERIFY") {
+    const challenge = evt?.data?.challenge || "";
+    return new Response(JSON.stringify({ challenge: await hmacHex(amt, challenge) }),
+      { headers: { "content-type": "application/json" } });
+  }
+
+  // All other events must carry a valid SC-Signature over the raw body.
+  const sig = request.headers.get("SC-Signature") || "";
+  const expect = await hmacHex(amt, raw);
+  if (sig.toLowerCase() !== expect.toLowerCase()) return new Response("bad signature", { status: 401 });
+
+  // Store the raw event (for shape inspection) + a best-effort SoC snapshot.
+  await env.STATE.put("smartcar_last_event", raw);
+  const snap = extractSnapshot(evt);
+  if (snap) {
+    await env.STATE.put("snapshot", JSON.stringify(snap));
+    await env.STATE.put("snapshot_log", JSON.stringify({ at: Date.now(), soc: snap.soc }));
+  }
+  return new Response("ok", { status: 200 });
+}
+
+// Best-effort SoC/range/charging extraction. Smartcar's VEHICLE_STATE shape is
+// refined against the first real events (stored in smartcar_last_event).
+function extractSnapshot(evt) {
+  const out = { receivedAt: Date.now() };
+  const text = JSON.stringify(evt);
+  // StateOfCharge is a 0..1 or 0..100 value; try common shapes.
+  const soc = findNumber(evt, ["StateOfCharge", "stateOfCharge", "percentRemaining", "state_of_charge"]);
+  if (soc == null) return null;
+  out.soc = soc > 1.5 ? soc / 100 : soc; // normalise to 0..1
+  const range = findNumber(evt, ["Range", "range", "ev_range"]);
+  if (range != null) out.rangeKm = range;
+  const charging = findBool(evt, ["IsCharging", "isCharging", "charging", "is_charging"]);
+  if (charging != null) out.charging = charging;
+  // measuredAt if the event carries a timestamp, else now.
+  out.measuredAt = findTimestamp(evt) || Date.now();
+  return out;
+}
+
+function walk(o, cb) {
+  if (o && typeof o === "object") {
+    for (const k of Object.keys(o)) { cb(k, o[k]); walk(o[k], cb); }
+  }
+}
+function findNumber(o, keys) {
+  let v = null;
+  walk(o, (k, val) => {
+    if (v != null) return;
+    if (keys.includes(k)) {
+      if (typeof val === "number") v = val;
+      else if (val && typeof val === "object" && typeof val.value === "number") v = val.value;
+    }
+  });
+  return v;
+}
+function findBool(o, keys) {
+  let v = null;
+  walk(o, (k, val) => {
+    if (v != null) return;
+    if (keys.includes(k)) {
+      if (typeof val === "boolean") v = val;
+      else if (val && typeof val === "object" && typeof val.value === "boolean") v = val.value;
+    }
+  });
+  return v;
+}
+function findTimestamp(o) {
+  let v = null;
+  walk(o, (k, val) => {
+    if (v != null) return;
+    if (["timestamp", "measuredAt", "recordedAt", "oemTimestamp"].includes(k) && typeof val === "string") {
+      const t = Date.parse(val); if (!isNaN(t)) v = t;
+    }
+  });
+  return v;
+}
+
+async function statusEndpoint(request, env) {
+  const url = new URL(request.url);
+  const token = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || url.searchParams.get("token");
+  if (!env.STATUS_TOKEN || token !== env.STATUS_TOKEN) return new Response("unauthorized", { status: 401 });
+  const snap = await env.STATE.get("snapshot", "json");
+  if (!snap) return new Response(JSON.stringify({ available: false }), { headers: { "content-type": "application/json" } });
+  const ageSec = Math.round((Date.now() - (snap.measuredAt || snap.receivedAt)) / 1000);
+  return new Response(JSON.stringify({ available: true, ageSeconds: ageSec, ...snap }),
+    { headers: { "content-type": "application/json" } });
 }
