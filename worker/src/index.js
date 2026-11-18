@@ -35,6 +35,7 @@ export default {
       if (p === "/smartcar/webhook") return smartcarWebhook(request, env);
       if (p === "/status") return statusEndpoint(request, env, ctx);
       if (p === "/learn") return learnEndpoint(request, env);
+      if (p === "/trim") return trimEndpoint(request, env);
       if (p === "/health") return new Response("ok", { status: 200 });
       return new Response("Not found", { status: 404 });
     } catch (e) {
@@ -318,6 +319,10 @@ async function smartcarWebhook(request, env) {
     return new Response("ok", { status: 200 });
   }
 
+  if (evt.eventType !== "VEHICLE_STATE") {
+    await env.STATE.put("smartcar_last_other_event", raw); // e.g. VEHICLE_ERROR for signals the car lacks
+    return new Response("ok", { status: 200 });
+  }
   await env.STATE.put("smartcar_last_event", raw);
   const snap = extractSnapshot(evt);
   if (snap) {
@@ -519,6 +524,9 @@ async function netCapacityKwh(env) {
 
 async function learn(env, snap) {
   try {
+    const log = (await env.STATE.get("measure_log", "json")) || [];
+    log.push({ t: snap.measuredAt, soc: snap.soc, odo: snap.odometerKm ?? null, ch: snap.charging ?? null, kw: snap.wattageW ?? null, src: snap.source });
+    await env.STATE.put("measure_log", JSON.stringify(log.slice(-200)));
     const t = (await outdoorTempInfo(env, null)).t;
     await learnConsumption(env, snap, t);
     await learnCharging(env, snap, t);
@@ -536,7 +544,8 @@ async function learnConsumption(env, snap, tempC) {
   if (!prev) return;
 
   const dKm = cur.odo - prev.odo;
-  const dSoc = prev.soc - cur.soc;
+  let dSoc = prev.soc - cur.soc;
+  if (dSoc < 0 && dSoc >= -0.02) dSoc = 0; // up to 2 pp "rise" = regen / rounding jitter, not a charge
   const parkedOrBad = prev.charging || cur.charging || dKm < 0.5 || dKm > 600 || dSoc < -0.005 || dSoc > 0.6
     || cur.t - prev.t > 36 * 3600 * 1000;
   let pending = await env.STATE.get("learn_pending", "json");
@@ -659,6 +668,24 @@ async function cronTick(env) {
   await pollSafely(env);
 }
 
+async function trimEndpoint(request, env) {
+  const url = new URL(request.url);
+  const token = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || url.searchParams.get("token");
+  if (!env.STATUS_TOKEN || token !== env.STATUS_TOKEN) return new Response("unauthorized", { status: 401 });
+  for (const [param, key] of [["set", "consumption_trim"], ["setLearned", "consumption_trim_learned"]]) {
+    const raw = url.searchParams.get(param);
+    if (raw === null) continue;
+    const v = Number(raw);
+    if (!(v >= 0.7 && v <= 1.6)) return new Response("trim must be 0.7-1.6", { status: 400 });
+    await env.STATE.put(key, String(v));
+  }
+  return new Response(JSON.stringify({
+    carEstimateTrim: Number(await env.STATE.get("consumption_trim")) || DEFAULT_CONSUMPTION_TRIM,
+    learnedTrim: Number(await env.STATE.get("consumption_trim_learned")) || 1.0,
+    note: "set= adjusts the car-estimate margin, setLearned= the margin on measured consumption (Maps calibration)",
+  }), { headers: { "content-type": "application/json" } });
+}
+
 async function learnEndpoint(request, env) {
   const url = new URL(request.url);
   const token = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || url.searchParams.get("token");
@@ -669,6 +696,7 @@ async function learnEndpoint(request, env) {
     consumption: await env.STATE.get("learn_cons", "json"),
     chargeSession: await env.STATE.get("charge_session", "json"),
     learnError: (await env.STATE.get("learn_error")) || null,
+    recentMeasurements: ((await env.STATE.get("measure_log", "json")) || []).slice(-15),
     connectorsSeen: await env.STATE.get("connectors_seen", "json"),
     capacityChecks: await env.STATE.get("capacity_checks", "json"),
     chargeBands: {},
@@ -694,6 +722,9 @@ async function learnEndpoint(request, env) {
 //                         to ~6 C. Heuristic until real sessions are logged.
 
 const REF_TEMP_C = 6;
+// Interim margin: the car's own estimate is a mixed-driving average, motorway use at ~6 C is
+// clearly higher. Replaced by data from real trips and Maps' predictions (see /trim).
+const DEFAULT_CONSUMPTION_TRIM = 1.15;
 const WEATHER_TTL_MS = 30 * 60 * 1000;
 
 async function refreshWeather(env) {
@@ -747,6 +778,15 @@ async function buildModel(env, snap, ctx) {
   // Real driving beats the car's estimate once we have >= 40 km in this temperature band.
   const lc = await learnedConsumption(env, t);
   if (lc) { model.consumptionKwhPer100 = lc.value; model.consumptionSource = "learned"; model.learnedKm = lc.km; }
+  // Calibration against Maps' own predictions (see /trim). Maps follows the numbers it is
+  // given, so if its arrival SoC is consistently too optimistic this factor lifts them.
+  const isLearned = model.consumptionSource === "learned";
+  const trim = Number(await env.STATE.get(isLearned ? "consumption_trim_learned" : "consumption_trim"))
+    || (isLearned ? 1.0 : DEFAULT_CONSUMPTION_TRIM);
+  if (model.consumptionKwhPer100) {
+    model.consumptionTrim = trim;
+    model.consumptionKwhPer100 = Math.round(model.consumptionKwhPer100 * trim * 10) / 10;
+  }
   const cc = await learnedChargeCurve(env, t);
   if (cc) { model.chargeCurveKw = cc.curveKw; model.chargeSessions = cc.sessions; }
   return model;
