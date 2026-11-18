@@ -411,11 +411,17 @@ async function pollSmartcar(env, retried) {
   await env.STATE.put("last_poll_at", String(Date.now()));
   const token = await scAppToken(env);
   const v = await scVehicle(env, token, !!retried);
-  const [soc, range, chg] = await Promise.all([
+  const needCap = !(await env.STATE.get("sc_capacity"));
+  const [soc, range, chg, cap] = await Promise.all([
     scSignal(token, v, "tractionbattery-stateofcharge"),
     scSignal(token, v, "tractionbattery-range"),
     scSignal(token, v, "charge-ischarging"),
+    needCap ? scSignal(token, v, "tractionbattery-nominalcapacity") : Promise.resolve(null),
   ]);
+  if (cap && cap.attrs?.body && typeof cap.attrs.body.capacity === "number") {
+    // Gross kWh as selected in Smartcar Connect (e.g. 82 for an ID.3 Pro S).
+    await env.STATE.put("sc_capacity", String(cap.attrs.body.capacity), { expirationTtl: 86400 });
+  }
   if (soc.httpError && !retried) return pollSmartcar(env, true); // ids may be stale after a reconnect
   if (soc.httpError) throw new Error("soc HTTP " + soc.httpError);
   if (soc.attrs.status?.value !== "SUCCESS" || typeof soc.attrs.body?.value !== "number") {
@@ -438,6 +444,60 @@ async function pollSmartcar(env, retried) {
 async function pollSafely(env) {
   try { return await pollSmartcar(env); }
   catch (e) { await env.STATE.put("last_poll_error", `${new Date().toISOString()} ${e.message || e}`); return null; }
+}
+
+// ---------- Dynamic model hints (capacity, consumption, charging) ----------
+//
+// The iOS app ships a baseline profile (id3.json). These hints let it adapt:
+//  * capacityKwhNet       from Smartcar NominalCapacity (gross) x 0.94
+//  * consumptionKwhPer100 implied by the car's OWN range estimate:
+//                         net kWh / (range / SoC) -- it tracks cold weather,
+//                         driving style and HVAC without us modelling them.
+//  * chargePowerScale     relative to the baseline curve, which is calibrated
+//                         to ~6 C. Heuristic until real sessions are logged.
+
+const REF_TEMP_C = 6;
+const WEATHER_TTL_MS = 30 * 60 * 1000;
+
+async function refreshWeather(env) {
+  try {
+    // Generic central-Denmark coordinates (no personal location is sent).
+    const r = await fetch("https://api.open-meteo.com/v1/forecast?latitude=55.7&longitude=11.5&current=temperature_2m",
+      { signal: AbortSignal.timeout(3000) });
+    if (!r.ok) return null;
+    const t = (await r.json())?.current?.temperature_2m;
+    if (typeof t !== "number") return null;
+    await env.STATE.put("weather", JSON.stringify({ t, at: Date.now() }));
+    return t;
+  } catch { return null; }
+}
+
+async function outdoorTemp(env, ctx) {
+  const c = await env.STATE.get("weather", "json");
+  if (c && Date.now() - c.at < WEATHER_TTL_MS) return c.t;
+  if (c) { // stale: answer now, refresh for next time
+    if (ctx && ctx.waitUntil) ctx.waitUntil(refreshWeather(env));
+    return c.t;
+  }
+  return refreshWeather(env); // nothing cached yet
+}
+
+async function buildModel(env, snap, ctx) {
+  const gross = Number(await env.STATE.get("sc_capacity")) || 82;
+  const net = Math.round(gross * 0.94);
+  const model = { capacityKwhNet: net, referenceTempC: REF_TEMP_C };
+
+  const t = await outdoorTemp(env, ctx);
+  if (typeof t === "number") {
+    model.temperatureC = Math.round(t * 10) / 10;
+    const scale = Math.min(2.0, Math.max(0.55, 1 + 0.08 * (t - REF_TEMP_C)));
+    model.chargePowerScale = Math.round(scale * 20) / 20; // steps of 0.05: keeps Maps from re-routing on noise
+  }
+  if (snap && snap.soc >= 0.15 && snap.rangeKm > 0) {
+    const kmAt100 = snap.rangeKm / snap.soc;
+    model.consumptionKwhPer100 = Math.round((net * 100 / kmAt100) * 10) / 10;
+  }
+  return model;
 }
 
 async function statusEndpoint(request, env, ctx) {
@@ -464,6 +524,7 @@ async function statusEndpoint(request, env, ctx) {
     return new Response(JSON.stringify({ available: false, lastError }), { headers: { "content-type": "application/json" } });
   }
   const ageSec = Math.round((Date.now() - (snap.measuredAt || snap.receivedAt)) / 1000);
-  return new Response(JSON.stringify({ available: true, ageSeconds: ageSec, lastError, ...snap }),
+  const model = await buildModel(env, snap, ctx);
+  return new Response(JSON.stringify({ available: true, ageSeconds: ageSec, lastError, model, ...snap }),
     { headers: { "content-type": "application/json" } });
 }

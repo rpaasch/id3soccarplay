@@ -34,13 +34,14 @@ final class PowerLevelHandler: NSObject, INGetCarPowerLevelStatusIntentHandling,
             return INGetCarPowerLevelStatusIntentResponse(code: .failure, userActivity: nil)
         }
         let s = current.state
+        let adjusted = profile.adjusted(with: s.model)
         SharedLog.shared.log(
             "INGetCarPowerLevelStatus[handle] -> SoC \(Int((s.stateOfCharge * 100).rounded()))% "
                 + "(\(current.origin.rawValue), measured \(Int(Date().timeIntervalSince(s.measuredAt) / 60)) min ago, "
-                + "charging \(s.isCharging))",
+                + "charging \(s.isCharging)); model: \(adjusted.note)",
             category: "power"
         )
-        return MapsPowerResponse.make(state: s, profile: profile)
+        return MapsPowerResponse.make(state: s, profile: adjusted.profile)
     }
 
     // MARK: Live updates during navigation
@@ -58,10 +59,11 @@ final class PowerLevelHandler: NSObject, INGetCarPowerLevelStatusIntentHandling,
                 if let profile = try? VehicleProfile.load(), let current = await StateProvider.current() {
                     let s = current.state
                     if Self.shouldPush(new: s, last: lastPushed) {
-                        box.value.didUpdate(getCarPowerLevelStatus: MapsPowerResponse.make(state: s, profile: profile))
+                        let adjusted = profile.adjusted(with: s.model)
+                        box.value.didUpdate(getCarPowerLevelStatus: MapsPowerResponse.make(state: s, profile: adjusted.profile))
                         lastPushed = s
                         SharedLog.shared.log(
-                            "push -> SoC \(Int((s.stateOfCharge * 100).rounded()))% (\(current.origin.rawValue))",
+                            "push -> SoC \(Int((s.stateOfCharge * 100).rounded()))% (\(current.origin.rawValue)); model: \(adjusted.note)",
                             category: "power"
                         )
                     }
@@ -91,6 +93,19 @@ final class PowerLevelHandler: NSObject, INGetCarPowerLevelStatusIntentHandling,
         guard let last else { return true }
         if abs(new.stateOfCharge - last.stateOfCharge) >= 0.01 { return true }
         if new.isCharging != last.isCharging { return true }
+        if modelChanged(new.model, last.model) { return true }
         return new.measuredAt > last.measuredAt
+    }
+
+    /// True when the dynamic numbers moved enough to matter (>= ~5 %), so Maps
+    /// is not made to re-route over noise.
+    private static func modelChanged(_ a: ModelHints?, _ b: ModelHints?) -> Bool {
+        func differs(_ x: Double?, _ y: Double?) -> Bool {
+            guard let x, let y else { return (x == nil) != (y == nil) }
+            return abs(x - y) / max(abs(y), 0.0001) >= 0.05
+        }
+        return differs(a?.consumptionKwhPer100, b?.consumptionKwhPer100)
+            || differs(a?.chargePowerScale, b?.chargePowerScale)
+            || differs(a?.capacityKwhNet, b?.capacityKwhNet)
     }
 }

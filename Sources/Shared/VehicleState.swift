@@ -19,4 +19,7 @@ struct VehicleState: Sendable, Codable {
     var rangeKm: Double?
     /// Minutes to full while charging, if known.
     var minutesToFull: Int?
+    /// Dynamic hints from the Worker (capacity, consumption, temperature). Optional:
+    /// without them the baseline profile in id3.json is used unchanged.
+    var model: ModelHints?
 }

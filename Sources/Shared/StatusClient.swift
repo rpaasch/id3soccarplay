@@ -21,6 +21,7 @@ private struct RemoteStatus: Decodable {
     /// Milliseconds since 1970 of the last real measurement (OEM time).
     let measuredAt: Double?
     let lastError: String?
+    let model: ModelHints?
 }
 
 enum StatusError: Error, CustomStringConvertible {
@@ -57,7 +58,8 @@ enum StatusClient {
             measuredAt: Date(timeIntervalSince1970: ms / 1000),
             isCharging: status.charging ?? false,
             rangeKm: status.rangeKm,
-            minutesToFull: nil
+            minutesToFull: nil,
+            model: status.model
         )
     }
 }

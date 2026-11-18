@@ -49,11 +49,16 @@ struct ContentView: View {
                 row("Rækkevidde", s.rangeKm.map { "\(Int($0.rounded())) km" } ?? "–")
                 row("Lader", s.isCharging ? "ja" : "nej")
                 row("Målt", ageText(s.measuredAt))
+                if let m = s.model {
+                    if let c = m.capacityKwhNet { row("Batteri (netto)", "\(Int(c)) kWh") }
+                    if let k = m.consumptionKwhPer100 { row("Forbrug (bilens estimat)", String(format: "%.1f kWh/100 km", k)) }
+                    if let t = m.temperatureC { row("Udetemperatur", String(format: "%.1f °C", t)) }
+                    if let x = m.chargePowerScale { row("Ladeeffekt vs. reference", String(format: "×%.2f", x)) }
+                }
             }
             Text(liveNote).font(.footnote).foregroundStyle(.secondary)
             if let p = profile {
                 row("Bil i Maps", "\(p.vehicle.mapsMake) \(p.vehicle.mapsModel) (maskering)")
-                row("Kapacitet (estimat)", "\(Int(p.battery.usableCapacityWh / 1000)) kWh")
             } else if let e = loadError {
                 Text("Kunne ikke læse id3.json: \(e)").foregroundStyle(.red)
             }

@@ -67,6 +67,8 @@ enum JSONValue: Sendable, Codable {
 struct JSONObject: Sendable, Codable {
     let fields: [String: JSONValue]
 
+    init(fields: [String: JSONValue]) { self.fields = fields }
+
     init(from decoder: Decoder) throws {
         fields = try decoder.singleValueContainer().decode([String: JSONValue].self)
     }
