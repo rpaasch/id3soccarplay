@@ -34,11 +34,18 @@ export default {
       if (p === "/oauth/callback") return oauthCallback(request, env);
       if (p === "/smartcar/webhook") return smartcarWebhook(request, env);
       if (p === "/status") return statusEndpoint(request, env, ctx);
+      if (p === "/learn") return learnEndpoint(request, env);
       if (p === "/health") return new Response("ok", { status: 200 });
       return new Response("Not found", { status: 404 });
     } catch (e) {
       return new Response("error: " + (e && e.message ? e.message : String(e)), { status: 500 });
     }
+  },
+
+  // Cron (every 5 min): while the car is charging, sample it so we can learn the
+  // real charging curve. Idle cars are NOT polled (webhooks + /status cover that).
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(cronTick(env));
   },
 };
 
@@ -326,6 +333,7 @@ async function storeSnapshotIfNewer(env, snap) {
   if (cur && cur.measuredAt && snap.measuredAt && cur.measuredAt > snap.measuredAt) return false;
   await env.STATE.put("snapshot", JSON.stringify(snap));
   await env.STATE.put("snapshot_log", JSON.stringify({ at: Date.now(), soc: snap.soc, source: snap.source }));
+  await learn(env, snap);
   return true;
 }
 
@@ -348,6 +356,13 @@ function extractSnapshot(evt) {
 
   const charging = by["charge-ischarging"];
   if (charging && charging.body && typeof charging.body.value === "boolean") out.charging = charging.body.value;
+
+  const odo = by["odometer-traveleddistance"];
+  if (odo && odo.body && typeof odo.body.value === "number" && odo.status?.value === "SUCCESS") {
+    out.odometerKm = odo.body.unit === "miles" ? odo.body.value * 1.609344 : odo.body.value;
+  }
+  const watt = by["charge-wattage"];
+  if (watt && watt.body && typeof watt.body.value === "number" && watt.status?.value === "SUCCESS") out.wattageW = watt.body.value;
 
   // Prefer the OEM measurement time of the SoC signal.
   const t = soc.meta && (soc.meta.oemUpdatedAt || soc.meta.retrievedAt);
@@ -412,11 +427,15 @@ async function pollSmartcar(env, retried) {
   const token = await scAppToken(env);
   const v = await scVehicle(env, token, !!retried);
   const needCap = !(await env.STATE.get("sc_capacity"));
-  const [soc, range, chg, cap] = await Promise.all([
+  const prevSnap = await env.STATE.get("snapshot", "json");
+  const wantWatt = prevSnap?.charging === true; // power is only meaningful while charging
+  const [soc, range, chg, cap, odo, watt] = await Promise.all([
     scSignal(token, v, "tractionbattery-stateofcharge"),
     scSignal(token, v, "tractionbattery-range"),
     scSignal(token, v, "charge-ischarging"),
     needCap ? scSignal(token, v, "tractionbattery-nominalcapacity") : Promise.resolve(null),
+    scSignal(token, v, "odometer-traveleddistance"), // ERROR until the owner grants the permission
+    wantWatt ? scSignal(token, v, "charge-wattage") : Promise.resolve(null),
   ]);
   if (cap && cap.attrs?.body && typeof cap.attrs.body.capacity === "number") {
     // Gross kWh as selected in Smartcar Connect (e.g. 82 for an ID.3 Pro S).
@@ -436,6 +455,10 @@ async function pollSmartcar(env, retried) {
     snap.rangeKm = Math.round(km * 10) / 10;
   }
   if (chg.attrs?.body && typeof chg.attrs.body.value === "boolean") snap.charging = chg.attrs.body.value;
+  if (odo?.attrs?.status?.value === "SUCCESS" && typeof odo.attrs.body?.value === "number") {
+    snap.odometerKm = odo.attrs.body.unit === "miles" ? odo.attrs.body.value * 1.609344 : odo.attrs.body.value;
+  }
+  if (watt?.attrs?.status?.value === "SUCCESS" && typeof watt.attrs.body?.value === "number") snap.wattageW = watt.attrs.body.value;
   await storeSnapshotIfNewer(env, snap);
   await env.STATE.put("last_poll_error", "");
   return snap;
@@ -444,6 +467,156 @@ async function pollSmartcar(env, retried) {
 async function pollSafely(env) {
   try { return await pollSmartcar(env); }
   catch (e) { await env.STATE.put("last_poll_error", `${new Date().toISOString()} ${e.message || e}`); return null; }
+}
+
+// ---------- Learning from real driving and charging ----------
+//
+// Consumption (needs Odometer permission): every new measurement is compared with
+// the previous one. Intervals where the car drove (odometer up), was not charging
+// and SoC only fell are accumulated; a trip chunk is committed once it covers
+// >= 25 km (SoC steps telescope, so quantisation error stays ~1 pp per chunk).
+// Totals are kept per 5 C temperature band with slow forgetting.
+//
+// Charging: samples (SoC, kW) collected during a session are committed at the
+// session's end -- but only for DC sessions (peak > 12 kW), so slow AC charging
+// never pollutes the DC curve. The learned curve uses the 80th percentile of the
+// last 10 samples per SoC decile and per temperature band: that approximates the
+// car's own limit rather than a weak charger's.
+
+const KM_CHUNK = 25;
+const DC_MIN_KW = 12;
+
+function tempBand(t) { return typeof t === "number" ? String(Math.floor(t / 5) * 5) : "na"; }
+
+async function netCapacityKwh(env) {
+  const gross = Number(await env.STATE.get("sc_capacity")) || 82;
+  return Math.round(gross * 0.94);
+}
+
+async function learn(env, snap) {
+  try {
+    const t = await outdoorTemp(env, null);
+    await learnConsumption(env, snap, t);
+    await learnCharging(env, snap, t);
+  } catch (e) {
+    await env.STATE.put("learn_error", `${new Date().toISOString()} ${e.message || e}`);
+  }
+}
+
+async function learnConsumption(env, snap, tempC) {
+  if (typeof snap.odometerKm !== "number") return;
+  const prev = await env.STATE.get("learn_anchor", "json");
+  const cur = { soc: snap.soc, odo: snap.odometerKm, t: snap.measuredAt, charging: !!snap.charging };
+  if (prev && cur.t <= prev.t) return; // not newer information
+  await env.STATE.put("learn_anchor", JSON.stringify(cur));
+  if (!prev) return;
+
+  const dKm = cur.odo - prev.odo;
+  const dSoc = prev.soc - cur.soc;
+  const parkedOrBad = prev.charging || cur.charging || dKm < 0.5 || dKm > 600 || dSoc < -0.005 || dSoc > 0.6
+    || cur.t - prev.t > 36 * 3600 * 1000;
+  let pending = await env.STATE.get("learn_pending", "json");
+  if (parkedOrBad) {
+    // A pure parking gap (no distance, no charging) keeps the chunk going; anything else breaks it.
+    const justParked = dKm < 0.5 && !prev.charging && !cur.charging && dSoc > -0.005;
+    if (!justParked && pending) await env.STATE.delete("learn_pending");
+    return;
+  }
+  const net = await netCapacityKwh(env);
+  pending = pending || { kwh: 0, km: 0, band: tempBand(tempC) };
+  pending.kwh += Math.max(0, dSoc) * net;
+  pending.km += dKm;
+  if (pending.km < KM_CHUNK) { await env.STATE.put("learn_pending", JSON.stringify(pending)); return; }
+
+  await env.STATE.delete("learn_pending");
+  const cons = (pending.kwh / pending.km) * 100;
+  if (cons < 9 || cons > 40) return; // implausible: discard (e.g. an unseen charge in between)
+  const all = (await env.STATE.get("learn_cons", "json")) || {};
+  const b = all[pending.band] || { kwh: 0, km: 0 };
+  b.kwh += pending.kwh; b.km += pending.km;
+  if (b.km > 600) { b.kwh *= 0.8; b.km *= 0.8; } // forget old driving slowly
+  all[pending.band] = b;
+  await env.STATE.put("learn_cons", JSON.stringify(all));
+}
+
+async function learnedConsumption(env, tempC) {
+  const b = ((await env.STATE.get("learn_cons", "json")) || {})[tempBand(tempC)];
+  if (!b || b.km < 40) return null;
+  return { value: Math.round((b.kwh / b.km) * 1000) / 10, km: Math.round(b.km) };
+}
+
+async function learnCharging(env, snap, tempC) {
+  const kw = typeof snap.wattageW === "number" ? snap.wattageW / 1000 : null;
+  let sess = await env.STATE.get("charge_session", "json");
+
+  if (snap.charging === true) {
+    if (kw == null) return; // no power reading with this measurement
+    sess = sess || { startedAt: snap.measuredAt, maxKw: 0, samples: [], band: tempBand(tempC) };
+    const last = sess.samples[sess.samples.length - 1];
+    if (last && last.t >= snap.measuredAt) return;
+    sess.samples.push({ t: snap.measuredAt, soc: snap.soc, kw: Math.round(kw * 10) / 10 });
+    sess.maxKw = Math.max(sess.maxKw, kw);
+    await env.STATE.put("charge_session", JSON.stringify(sess));
+    return;
+  }
+  if (snap.charging === false && sess) { // session ended
+    await env.STATE.delete("charge_session");
+    if (sess.maxKw < DC_MIN_KW || sess.samples.length < 3) return; // AC or too short to learn from
+    const key = `learn_charge_${sess.band}`;
+    const data = (await env.STATE.get(key, "json")) || { bins: Array.from({ length: 11 }, () => []), sessions: 0 };
+    for (const sm of sess.samples) {
+      const i = Math.max(0, Math.min(10, Math.round(sm.soc * 10)));
+      data.bins[i].push(sm.kw);
+      if (data.bins[i].length > 10) data.bins[i].shift();
+    }
+    data.sessions = (data.sessions || 0) + 1;
+    data.updated = Date.now();
+    await env.STATE.put(key, JSON.stringify(data));
+  }
+}
+
+function percentile(arr, p) {
+  const a = [...arr].sort((x, y) => x - y);
+  return a[Math.min(a.length - 1, Math.floor(p * a.length))];
+}
+
+async function learnedChargeCurve(env, tempC) {
+  const d = await env.STATE.get(`learn_charge_${tempBand(tempC)}`, "json");
+  if (!d) return null;
+  const curve = d.bins.map((v) => (v.length ? Math.round(percentile(v, 0.8) * 10) / 10 : null));
+  return curve.filter((x) => x != null).length >= 3 ? { curveKw: curve, sessions: d.sessions || 0 } : null;
+}
+
+async function cronTick(env) {
+  const snap = await env.STATE.get("snapshot", "json");
+  if (!snap || snap.charging !== true) return;
+  const lastPoll = Number((await env.STATE.get("last_poll_at")) || 0);
+  const dc = (snap.wattageW || 0) / 1000 >= DC_MIN_KW;
+  // DC: every ~5 min (Smartcar's VW data refreshes every 4-5 min). AC: only every ~30 min.
+  if (Date.now() - lastPoll < (dc ? 4.5 : 28) * 60 * 1000) return;
+  await pollSafely(env);
+}
+
+async function learnEndpoint(request, env) {
+  const url = new URL(request.url);
+  const token = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || url.searchParams.get("token");
+  if (!env.STATUS_TOKEN || token !== env.STATUS_TOKEN) return new Response("unauthorized", { status: 401 });
+  const out = {
+    anchor: await env.STATE.get("learn_anchor", "json"),
+    pending: await env.STATE.get("learn_pending", "json"),
+    consumption: await env.STATE.get("learn_cons", "json"),
+    chargeSession: await env.STATE.get("charge_session", "json"),
+    learnError: (await env.STATE.get("learn_error")) || null,
+    chargeBands: {},
+  };
+  const list = await env.STATE.list({ prefix: "learn_charge_" });
+  for (const k of list.keys) {
+    const d = await env.STATE.get(k.name, "json");
+    out.chargeBands[k.name.replace("learn_charge_", "")] = {
+      sessions: d.sessions, samplesPerDecile: d.bins.map((b) => b.length), p80kW: d.bins.map((b) => (b.length ? percentile(b, 0.8) : null)),
+    };
+  }
+  return new Response(JSON.stringify(out, null, 1), { headers: { "content-type": "application/json" } });
 }
 
 // ---------- Dynamic model hints (capacity, consumption, charging) ----------
@@ -496,7 +669,13 @@ async function buildModel(env, snap, ctx) {
   if (snap && snap.soc >= 0.15 && snap.rangeKm > 0) {
     const kmAt100 = snap.rangeKm / snap.soc;
     model.consumptionKwhPer100 = Math.round((net * 100 / kmAt100) * 10) / 10;
+    model.consumptionSource = "car-estimate";
   }
+  // Real driving beats the car's estimate once we have >= 40 km in this temperature band.
+  const lc = await learnedConsumption(env, t);
+  if (lc) { model.consumptionKwhPer100 = lc.value; model.consumptionSource = "learned"; model.learnedKm = lc.km; }
+  const cc = await learnedChargeCurve(env, t);
+  if (cc) { model.chargeCurveKw = cc.curveKw; model.chargeSessions = cc.sessions; }
   return model;
 }
 

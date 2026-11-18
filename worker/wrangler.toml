@@ -8,6 +8,9 @@ workers_dev = true
 binding = "STATE"
 id = "335ac8e5f6c34183a6eaeea409f412a7"
 
+[triggers]
+crons = ["*/5 * * * *"]
+
 [vars]
 GH_REPO = "rpaasch/id3soccarplay"
 OIDC_AUDIENCE = "id3maps-ci"
