@@ -20,6 +20,8 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.navigation</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
 	<key>NSSiriUsageDescription</key>
 	<string>Deler bilens batteriniveau med Apple Maps til ladeplanlægning.</string>
 	<key>INIntentsSupported</key>
