@@ -26,7 +26,7 @@ jobs:
   # Always-on compile check. No signing material needed — validates that the
   # app + extension compile under Swift 6 strict concurrency on the macOS runner.
   compile:
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -71,7 +71,7 @@ jobs:
   adhoc:
     needs: compile
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.sign }}
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 40
     permissions:
       id-token: write   # OIDC token used to fetch the signing bundle from the Worker
