@@ -233,18 +233,21 @@ function servePng() {
 // ---------- Smartcar OAuth + webhook (M1) ----------
 
 const SC_CONNECT = "https://connect.smartcar.com/oauth/authorize";
-const SC_TOKEN = "https://auth.smartcar.com/oauth/token";
 const SC_SCOPE = "read_battery read_charge read_vehicle_info";
 
+// v3 Connect flow: redirect with the application_id and response_type=none
+// (no auth-code exchange — the v2 per-vehicle token flow is deprecated Dec 2026).
+// On success Smartcar redirects back with ?user_id=..., which we store.
 async function oauthStart(request, env) {
-  if (!env.SMARTCAR_CLIENT_ID) return new Response("SMARTCAR_CLIENT_ID not set", { status: 503 });
+  if (!env.SMARTCAR_APPLICATION_ID) return new Response("SMARTCAR_APPLICATION_ID not set", { status: 503 });
   const origin = new URL(request.url).origin;
   const params = new URLSearchParams({
-    response_type: "code",
-    client_id: env.SMARTCAR_CLIENT_ID,
-    scope: SC_SCOPE,
+    response_type: "none",
+    application_id: env.SMARTCAR_APPLICATION_ID,
     redirect_uri: `${origin}/oauth/callback`,
+    scope: SC_SCOPE,
     mode: env.SMARTCAR_MODE || "live",
+    external_id: "id3maps",
     state: "id3maps",
   });
   return Response.redirect(`${SC_CONNECT}?${params.toString()}`, 302);
@@ -252,34 +255,13 @@ async function oauthStart(request, env) {
 
 async function oauthCallback(request, env) {
   const url = new URL(request.url);
-  const code = url.searchParams.get("code");
   const err = url.searchParams.get("error");
-  if (err) return htmlMsg("Afvist", `Smartcar returnerede: ${err}`);
-  if (!code) return htmlMsg("Mangler kode", "Ingen autorisationskode i callback.");
-  if (!env.SMARTCAR_CLIENT_SECRET) return new Response("SMARTCAR_CLIENT_SECRET not set", { status: 503 });
-
-  const basic = btoa(`${env.SMARTCAR_CLIENT_ID}:${env.SMARTCAR_CLIENT_SECRET}`);
-  const body = new URLSearchParams({
-    grant_type: "authorization_code",
-    code,
-    redirect_uri: `${url.origin}/oauth/callback`,
-  });
-  const res = await fetch(SC_TOKEN, {
-    method: "POST",
-    headers: { Authorization: `Basic ${basic}`, "content-type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
-  const txt = await res.text();
-  if (!res.ok) return htmlMsg("Token-fejl", `HTTP ${res.status}: ${txt.slice(0, 300)}`);
-  const tok = JSON.parse(txt);
-  const store = {
-    access_token: tok.access_token,
-    refresh_token: tok.refresh_token,
-    expires_at: Date.now() + (tok.expires_in || 7200) * 1000,
-    connected_at: Date.now(),
-  };
-  await env.STATE.put("smartcar_tokens", JSON.stringify(store));
-  return htmlMsg("Forbundet ✅", "Din VW ID.3 er nu koblet til. Du kan lukke denne side. Næste skridt er at tilføje en webhook i Smartcar-dashboardet.");
+  if (err) return htmlMsg("Afvist", `Smartcar returnerede: ${err} — ${url.searchParams.get("error_description") || ""}`);
+  const userId = url.searchParams.get("user_id");
+  if (!userId) return htmlMsg("Mangler user_id", "Ingen user_id i callback. Tjek at redirect-URI og application_id er korrekte.");
+  await env.STATE.put("smartcar_user_id", userId);
+  await env.STATE.put("smartcar_connection", JSON.stringify({ userId, connectedAt: Date.now() }));
+  return htmlMsg("Forbundet ✅", "Din bil er koblet til. Du kan lukke denne side. Næste skridt (jeg guider dig) er at tilføje en webhook i Smartcar-dashboardet, så batteriniveauet skubbes hertil.");
 }
 
 function htmlMsg(title, msg) {
@@ -328,60 +310,31 @@ async function smartcarWebhook(request, env) {
   return new Response("ok", { status: 200 });
 }
 
-// Best-effort SoC/range/charging extraction. Smartcar's VEHICLE_STATE shape is
-// refined against the first real events (stored in smartcar_last_event).
+// Parse a VEHICLE_STATE event per Smartcar's documented shape:
+// data.signals[] where each has { code, name, group, body:{unit,value}, meta }.
+// SoC code = "tractionbattery-stateofcharge" (value in percent).
 function extractSnapshot(evt) {
-  const out = { receivedAt: Date.now() };
-  const text = JSON.stringify(evt);
-  // StateOfCharge is a 0..1 or 0..100 value; try common shapes.
-  const soc = findNumber(evt, ["StateOfCharge", "stateOfCharge", "percentRemaining", "state_of_charge"]);
-  if (soc == null) return null;
-  out.soc = soc > 1.5 ? soc / 100 : soc; // normalise to 0..1
-  const range = findNumber(evt, ["Range", "range", "ev_range"]);
-  if (range != null) out.rangeKm = range;
-  const charging = findBool(evt, ["IsCharging", "isCharging", "charging", "is_charging"]);
-  if (charging != null) out.charging = charging;
-  // measuredAt if the event carries a timestamp, else now.
-  out.measuredAt = findTimestamp(evt) || Date.now();
-  return out;
-}
+  const signals = (evt && evt.data && Array.isArray(evt.data.signals)) ? evt.data.signals : [];
+  const by = {};
+  for (const s of signals) if (s && s.code) by[s.code] = s;
 
-function walk(o, cb) {
-  if (o && typeof o === "object") {
-    for (const k of Object.keys(o)) { cb(k, o[k]); walk(o[k], cb); }
-  }
-}
-function findNumber(o, keys) {
-  let v = null;
-  walk(o, (k, val) => {
-    if (v != null) return;
-    if (keys.includes(k)) {
-      if (typeof val === "number") v = val;
-      else if (val && typeof val === "object" && typeof val.value === "number") v = val.value;
-    }
-  });
-  return v;
-}
-function findBool(o, keys) {
-  let v = null;
-  walk(o, (k, val) => {
-    if (v != null) return;
-    if (keys.includes(k)) {
-      if (typeof val === "boolean") v = val;
-      else if (val && typeof val === "object" && typeof val.value === "boolean") v = val.value;
-    }
-  });
-  return v;
-}
-function findTimestamp(o) {
-  let v = null;
-  walk(o, (k, val) => {
-    if (v != null) return;
-    if (["timestamp", "measuredAt", "recordedAt", "oemTimestamp"].includes(k) && typeof val === "string") {
-      const t = Date.parse(val); if (!isNaN(t)) v = t;
-    }
-  });
-  return v;
+  const soc = by["tractionbattery-stateofcharge"];
+  if (!soc || !soc.body || typeof soc.body.value !== "number") return null;
+
+  const out = { receivedAt: Date.now() };
+  out.soc = soc.body.value > 1.5 ? soc.body.value / 100 : soc.body.value; // -> 0..1
+
+  const range = by["tractionbattery-range"];
+  if (range && range.body && typeof range.body.value === "number") out.rangeKm = range.body.value;
+
+  const charging = by["charge-ischarging"];
+  if (charging && charging.body && typeof charging.body.value === "boolean") out.charging = charging.body.value;
+
+  // Prefer the OEM measurement time of the SoC signal.
+  const t = soc.meta && (soc.meta.oemUpdatedAt || soc.meta.retrievedAt);
+  const parsed = typeof t === "number" ? t : (typeof t === "string" ? Date.parse(t) : NaN);
+  out.measuredAt = isNaN(parsed) ? Date.now() : parsed;
+  return out;
 }
 
 async function statusEndpoint(request, env) {
