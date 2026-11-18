@@ -20,7 +20,7 @@ let jwksCache = null;
 let jwksCacheAt = 0;
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const p = url.pathname;
     try {
@@ -33,7 +33,7 @@ export default {
       if (p === "/oauth/start") return oauthStart(request, env);
       if (p === "/oauth/callback") return oauthCallback(request, env);
       if (p === "/smartcar/webhook") return smartcarWebhook(request, env);
-      if (p === "/status") return statusEndpoint(request, env);
+      if (p === "/status") return statusEndpoint(request, env, ctx);
       if (p === "/health") return new Response("ok", { status: 200 });
       return new Response("Not found", { status: 404 });
     } catch (e) {
@@ -303,14 +303,30 @@ async function smartcarWebhook(request, env) {
   const expect = await hmacHex(amt, raw);
   if (sig.toLowerCase() !== expect.toLowerCase()) return new Response("bad signature", { status: 401 });
 
-  // Store the raw event (for shape inspection) + a best-effort SoC snapshot.
+  // Smartcar's "Test webhook" button sends a fake Tesla (mode TEST, SoC 78 %).
+  // Never let that reach the snapshot Maps reads.
+  const isTest = String(evt?.meta?.mode || "").toUpperCase() === "TEST" || evt?.data?.vehicle?.mode === "test";
+  if (isTest) {
+    await env.STATE.put("smartcar_last_test_event", raw);
+    return new Response("ok", { status: 200 });
+  }
+
   await env.STATE.put("smartcar_last_event", raw);
   const snap = extractSnapshot(evt);
   if (snap) {
-    await env.STATE.put("snapshot", JSON.stringify(snap));
-    await env.STATE.put("snapshot_log", JSON.stringify({ at: Date.now(), soc: snap.soc }));
+    snap.source = "webhook";
+    await storeSnapshotIfNewer(env, snap);
   }
   return new Response("ok", { status: 200 });
+}
+
+// Keep whichever measurement is newest (webhook pushes and polls race).
+async function storeSnapshotIfNewer(env, snap) {
+  const cur = await env.STATE.get("snapshot", "json");
+  if (cur && cur.measuredAt && snap.measuredAt && cur.measuredAt > snap.measuredAt) return false;
+  await env.STATE.put("snapshot", JSON.stringify(snap));
+  await env.STATE.put("snapshot_log", JSON.stringify({ at: Date.now(), soc: snap.soc, source: snap.source }));
+  return true;
 }
 
 // Parse a VEHICLE_STATE event per Smartcar's documented shape:
@@ -340,13 +356,114 @@ function extractSnapshot(evt) {
   return out;
 }
 
-async function statusEndpoint(request, env) {
+// ---------- Smartcar polling (v3, M2M app token) ----------
+
+const SC_IAM = "https://iam.smartcar.com/oauth2/token";
+const SC_API = "https://vehicle.api.smartcar.com/v3";
+const POLL_MIN_INTERVAL_MS = 3 * 60 * 1000; // never poll more often than this
+
+async function scAppToken(env) {
+  const cached = await env.STATE.get("sc_app_token", "json");
+  if (cached && cached.expiresAt > Date.now() + 60_000) return cached.token;
+  if (!env.SMARTCAR_CLIENT_ID || !env.SMARTCAR_CLIENT_SECRET) throw new Error("smartcar client credentials not set");
+  const res = await fetch(SC_IAM, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: env.SMARTCAR_CLIENT_ID,
+      client_secret: env.SMARTCAR_CLIENT_SECRET,
+    }).toString(),
+  });
+  if (!res.ok) throw new Error("smartcar token HTTP " + res.status);
+  const j = await res.json();
+  const ttl = Math.max(60, (j.expires_in || 3600) - 120);
+  await env.STATE.put("sc_app_token", JSON.stringify({ token: j.access_token, expiresAt: Date.now() + ttl * 1000 }), { expirationTtl: ttl });
+  return j.access_token;
+}
+
+// Find the live, active connection (vehicle id + user id) and cache it.
+async function scVehicle(env, token, forceRefresh) {
+  if (!forceRefresh) {
+    const cached = await env.STATE.get("sc_vehicle", "json");
+    if (cached) return cached;
+  }
+  const res = await fetch(`${SC_API}/connections`, { headers: { authorization: `Bearer ${token}` } });
+  if (!res.ok) throw new Error("smartcar connections HTTP " + res.status);
+  const j = await res.json();
+  const c = (j.data || []).find((x) => x.attributes?.status?.name === "ACTIVE" && x.attributes?.vehicle?.mode === "live");
+  if (!c) throw new Error("no active live connection");
+  const v = { vehicleId: c.relationships.vehicle.data.id, userId: c.relationships.user.data.id };
+  await env.STATE.put("sc_vehicle", JSON.stringify(v), { expirationTtl: 86400 });
+  return v;
+}
+
+async function scSignal(token, v, code) {
+  const res = await fetch(`${SC_API}/vehicles/${v.vehicleId}/signals/${code}`, {
+    headers: { authorization: `Bearer ${token}`, "sc-user-id": v.userId },
+  });
+  if (!res.ok) return { httpError: res.status };
+  const j = await res.json();
+  return { attrs: j.data?.attributes || {}, meta: j.data?.meta || {} };
+}
+
+async function pollSmartcar(env, retried) {
+  await env.STATE.put("last_poll_at", String(Date.now()));
+  const token = await scAppToken(env);
+  const v = await scVehicle(env, token, !!retried);
+  const [soc, range, chg] = await Promise.all([
+    scSignal(token, v, "tractionbattery-stateofcharge"),
+    scSignal(token, v, "tractionbattery-range"),
+    scSignal(token, v, "charge-ischarging"),
+  ]);
+  if (soc.httpError && !retried) return pollSmartcar(env, true); // ids may be stale after a reconnect
+  if (soc.httpError) throw new Error("soc HTTP " + soc.httpError);
+  if (soc.attrs.status?.value !== "SUCCESS" || typeof soc.attrs.body?.value !== "number") {
+    throw new Error("soc status " + (soc.attrs.status?.value || "?") + " " + JSON.stringify(soc.attrs.status?.error || ""));
+  }
+  const snap = { receivedAt: Date.now(), source: "poll" };
+  snap.soc = soc.attrs.body.value / 100;
+  const t = Date.parse(soc.meta.oemUpdatedAt || soc.meta.retrievedAt || "");
+  snap.measuredAt = isNaN(t) ? Date.now() : t;
+  if (range.attrs?.body && typeof range.attrs.body.value === "number") {
+    const km = range.attrs.body.unit === "miles" ? range.attrs.body.value * 1.609344 : range.attrs.body.value;
+    snap.rangeKm = Math.round(km * 10) / 10;
+  }
+  if (chg.attrs?.body && typeof chg.attrs.body.value === "boolean") snap.charging = chg.attrs.body.value;
+  await storeSnapshotIfNewer(env, snap);
+  await env.STATE.put("last_poll_error", "");
+  return snap;
+}
+
+async function pollSafely(env) {
+  try { return await pollSmartcar(env); }
+  catch (e) { await env.STATE.put("last_poll_error", `${new Date().toISOString()} ${e.message || e}`); return null; }
+}
+
+async function statusEndpoint(request, env, ctx) {
   const url = new URL(request.url);
   const token = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || url.searchParams.get("token");
   if (!env.STATUS_TOKEN || token !== env.STATUS_TOKEN) return new Response("unauthorized", { status: 401 });
-  const snap = await env.STATE.get("snapshot", "json");
-  if (!snap) return new Response(JSON.stringify({ available: false }), { headers: { "content-type": "application/json" } });
+
+  let snap = await env.STATE.get("snapshot", "json");
+  const lastPoll = Number((await env.STATE.get("last_poll_at")) || 0);
+  const force = url.searchParams.get("refresh") === "1";
+  const due = force || Date.now() - lastPoll > POLL_MIN_INTERVAL_MS;
+
+  if (due) {
+    if (!snap || force) {
+      await pollSafely(env); // nothing to show yet: wait for it
+      snap = await env.STATE.get("snapshot", "json");
+    } else if (ctx && ctx.waitUntil) {
+      ctx.waitUntil(pollSafely(env)); // answer fast, refresh for the next call
+    }
+  }
+
+  const lastError = (await env.STATE.get("last_poll_error")) || null;
+  if (!snap) {
+    return new Response(JSON.stringify({ available: false, lastError }), { headers: { "content-type": "application/json" } });
+  }
   const ageSec = Math.round((Date.now() - (snap.measuredAt || snap.receivedAt)) / 1000);
-  return new Response(JSON.stringify({ available: true, ageSeconds: ageSec, ...snap }),
+  return new Response(JSON.stringify({ available: true, ageSeconds: ageSec, lastError, ...snap }),
     { headers: { "content-type": "application/json" } });
 }
