@@ -241,3 +241,24 @@ Analyse af symboldumps fra `VirtualGarage.framework` (til stede i både iOS 26.5
 5. **make/model = Porsche/Taycan** i `INCar` (maskering), med ID.3-tal i formula-argumenterne.
 
 Dette forenkler projektet: ingen ASC-app-post, ingen TestFlight, kun Ad Hoc-signering.
+
+---
+
+## 9. Signering lykkedes via Admin-API (2026-11-18) — SiriKit på wildcard virker
+
+Genbrugte identifikatorer fra et andet projekt (ChargePilot): Team `XY6GZ256WA`, Issuer `69a6de73-…`. Ny Admin-ASC-nøgle `FB9V6JL244`. Alt signeringsmateriale blev oprettet **programmatisk via App Store Connect API'et** fra sky-sessionen:
+
+- ✅ Apple Distribution-certifikat + `.p12` (nøgle+CSR genereret med openssl, cert via `POST /v1/certificates`).
+- ✅ Wildcard-App-ID `com.porsche.*` (`POST /v1/bundleIds`, platform IOS).
+- ✅ Enhed registreret via UDID (`POST /v1/devices`).
+- ✅ iOS Ad Hoc-profil (`POST /v1/profiles`, `IOS_APP_ADHOC`).
+
+**Vigtig korrektion til §1/§8:** M-1 antog, at wildcard-profiler ikke kan få SiriKit. Det er **forkert** med en Admin-nøgle:
+
+- `POST /v1/bundleIdCapabilities` med `SIRIKIT` på wildcard-ID'et → **HTTP 201 (lykkedes)**.
+- Samme kald med `APP_GROUPS` → **HTTP 409** ("UNIVERSAL AppId does not support changes to the 'App Group' feature"). App Groups kan altså stadig ikke bruges (vi bruger keychain-deling).
+- Efter SiriKit blev slået til, indeholder den regenererede Ad Hoc-profil `com.apple.developer.siri = True`.
+
+**Konsekvens:** vi kan beholde Siri-entitlementet præcis som evmaps, så den variabel er ikke længere en risiko for Maps-tricket. Profilens entitlements: `application-identifier=XY6GZ256WA.com.porsche.*`, `keychain-access-groups=[XY6GZ256WA.*, com.apple.token]`, `com.apple.developer.siri=True`. Profilen udløber 2027-11-18.
+
+Krav til fornyelse (M3): cert og profil udløber om et år; scriptet `scripts/asc.py` kan regenerere begge.

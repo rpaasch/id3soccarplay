@@ -19,7 +19,11 @@ import Foundation
 /// `$(AppIdentifierPrefix)` is supplied by the system at runtime, so the code
 /// uses the bare group and lets the keychain resolve the team prefix.
 enum SharedConfig {
-    static let keychainAccessGroup = "com.porsche.one.shared"
+    /// Full keychain access group, including the team prefix. The Ad Hoc profile
+    /// grants `XY6GZ256WA.*`, and both app and extension request
+    /// `$(AppIdentifierPrefix)com.porsche.one.shared` in their entitlements, so
+    /// the runtime access group is the team id + that group.
+    static let keychainAccessGroup = "XY6GZ256WA.com.porsche.one.shared"
     static let logService = "com.porsche.one.log"
     static let maxEntries = 400
 }
