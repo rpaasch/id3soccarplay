@@ -797,7 +797,41 @@ const SHAPE_TESTS = {
   "test-slow": [1.45, 1.45, 1.45, 1.45, 1, 1, 1, 0.7, 0.7, 0.7],
   "test-mid": [1, 1, 1, 1, 1, 1.6, 1.6, 1, 1, 1], // only ~100-140 km/h if bins are ~20 km/h wide
 };
-const SHAPE_BINS = { city: [0, 1, 2, 3], road: [4, 5, 6], motorway: [7, 8, 9] };
+// Confirmed by route tests on 2026-11-19 (only bins 5-6 dearer => Maps added a charging stop on a
+// 175 km motorway route; city route unchanged): the bins are ~20 km/h wide, 0-20 ... 180-200 km/h.
+const SHAPE_BINS = { city: [0, 1, 2], road: [3, 4], motorway: [5, 6, 7, 8, 9] };
+const BIN_KMH = [10, 30, 50, 70, 90, 110, 130, 150, 170, 190];
+// Typical share of distance per bin (Danish mixed driving), used only to anchor the curve so the
+// distance-weighted average equals the measured/estimated consumption.
+const BIN_MIX = [0.03, 0.12, 0.15, 0.12, 0.18, 0.2, 0.15, 0.05, 0, 0];
+
+// Traction energy of an ID.3 (CdA ~0.63 m2, ~1.9 t, rolling 0.010, drivetrain 85 %), kWh/100 km.
+function physicsKwhPer100(kmh) {
+  const v = kmh / 3.6;
+  const newtons = 0.5 * 1.25 * 0.63 * v * v + 0.010 * 1900 * 9.81;
+  return newtons / 3.6 / 0.85 / 10;
+}
+
+// Speed bins (traction only, kWh/100 km) + auxiliary power (W) for Maps, anchored to `overall`.
+// Winter overhead is split physically: cold air/tyres raise traction a little (kt), cabin and
+// battery heating are a POWER (W) that Maps applies per hour -- so a 10 km/h queue costs more per
+// km than the motorway, as in reality. Whatever remains is spread proportionally (s) so that the
+// distance-weighted mix equals the measured/estimated consumption.
+function physicsBins(overall, tempC) {
+  if (!(overall > 5)) return null;
+  const T = typeof tempC === "number" ? tempC : 8;
+  const kt = Math.min(1.3, Math.max(1, 1 + 0.012 * (15 - T)));
+  const auxKw = Math.min(3, Math.max(0.4, 0.4 + 0.08 * (15 - T)));
+  const sumMix = BIN_MIX.reduce((a, b) => a + b, 0);
+  const trac = BIN_KMH.map(physicsKwhPer100);
+  const w = BIN_MIX.reduce((a, m, i) => a + m * trac[i], 0) / sumMix;
+  const perKw = BIN_MIX.reduce((a, m, i) => a + m * (100 / BIN_KMH[i]), 0) / sumMix; // kWh/100 km per kW
+  const s = Math.min(1.6, Math.max(0.7, overall / (kt * w + auxKw * perKw)));
+  return {
+    bins: trac.map((x) => Math.round(Math.min(60, Math.max(4, x * kt * s)) * 10) / 10),
+    auxW: Math.round(auxKw * s * 1000),
+  };
+}
 
 function consumptionShape(mode, bySpeed) {
   if (SHAPE_TESTS[mode]) return SHAPE_TESTS[mode];
@@ -819,10 +853,10 @@ async function shapeEndpoint(request, env) {
   if (!env.STATUS_TOKEN || token !== env.STATUS_TOKEN) return new Response("unauthorized", { status: 401 });
   const set = url.searchParams.get("set");
   if (set !== null) {
-    if (!["off", "learned", ...Object.keys(SHAPE_TESTS)].includes(set)) return new Response("set must be off|learned|test-fast|test-slow|test-mid", { status: 400 });
+    if (!["off", "physics", "learned", ...Object.keys(SHAPE_TESTS)].includes(set)) return new Response("set must be off|physics|learned|test-fast|test-slow|test-mid", { status: 400 });
     await kvPut(env, "consumption_shape_mode", set);
   }
-  const mode = (await env.STATE.get("consumption_shape_mode")) || "off";
+  const mode = (await env.STATE.get("consumption_shape_mode")) || "physics";
   return new Response(JSON.stringify({ mode, tests: SHAPE_TESTS, bins: SHAPE_BINS }), { headers: { "content-type": "application/json" } });
 }
 
@@ -984,8 +1018,14 @@ async function buildModel(env, snap, ctx) {
     model.consumptionKwhPer100 = Math.round(model.consumptionKwhPer100 * trim * 10) / 10;
   }
   if (Object.keys(bySpeed).length) model.consumptionBySpeed = bySpeed;
-  const shape = consumptionShape(shapeMode || "off", bySpeed);
-  if (shape) { model.consumptionShape = shape; model.consumptionShapeMode = shapeMode; }
+  const mode = shapeMode || "physics"; // default since the bin meaning was confirmed
+  if (mode === "physics" && model.consumptionKwhPer100) {
+    const ph = physicsBins(model.consumptionKwhPer100, t);
+    if (ph) { model.consumptionBinsKwhPer100 = ph.bins; model.auxPowerW = ph.auxW; model.consumptionShapeMode = "physics"; }
+  } else {
+    const shape = consumptionShape(mode, bySpeed);
+    if (shape) { model.consumptionShape = shape; model.consumptionShapeMode = mode; }
+  }
   if (cc) { model.chargeCurveKw = cc.curveKw; model.chargeSessions = cc.sessions; model.chargeCurveWarm = !!cc.warm; }
   model.batteryWarm = warm;
   return model;

@@ -40,8 +40,13 @@ struct ModelHints: Sendable, Codable {
     /// 10 multipliers applied element-wise to Maps' consumption values (hypothesis: speed bins,
     /// slow -> fast). The mean is rescaled afterwards, so the shape only redistributes.
     var consumptionShape: [Double]?
-    /// "learned", "test-fast" or "test-slow".
+    /// "physics", "learned" or a test mode.
     var consumptionShapeMode: String?
+    /// Absolute consumption (kWh/100 km) for each of Maps' 10 speed bins (~20 km/h wide,
+    /// confirmed by route tests). When present it replaces the vector; no mean rescaling.
+    var consumptionBinsKwhPer100: [Double]?
+    /// Auxiliary power (heating etc.) in W that Maps adds per hour of driving; replaces id3.json's 500 W.
+    var auxPowerW: Double?
 }
 
 extension JSONObject {
@@ -72,6 +77,13 @@ extension JSONObject {
     func replacingArray(_ key: String, with values: [Double]) -> JSONObject {
         var f = fields
         f[key] = .array(values.map { .number($0) })
+        return JSONObject(fields: f)
+    }
+
+    /// Copy with the number under `key` replaced.
+    func replacingNumber(_ key: String, with value: Double) -> JSONObject {
+        var f = fields
+        f[key] = .number(value)
         return JSONObject(fields: f)
     }
 
@@ -134,7 +146,17 @@ extension VehicleProfile {
             consumptionParams = consumptionParams.multiplyingArray("vehicle_consumption_values_wh_per_m", by: shape)
             notes.append("shape \(hints.consumptionShapeMode ?? "?")")
         }
-        if let implied = hints.consumptionKwhPer100,
+        if let bins = hints.consumptionBinsKwhPer100, bins.count == 10 {
+            // kWh/100 km -> Wh per metre is /100.
+            consumptionParams = consumptionParams.replacingArray(
+                "vehicle_consumption_values_wh_per_m", with: bins.map { min(0.6, max(0.05, $0 / 100)) })
+            if let aux = hints.auxPowerW, (200...4000).contains(aux) {
+                consumptionParams = consumptionParams.replacingNumber("vehicle_auxiliary_power_w", with: aux)
+            }
+            notes.append(String(format: "speed bins %@ (50: %.0f, 110: %.0f, 130: %.0f kWh/100km + aux %.0f W; mean %.1f)",
+                                hints.consumptionShapeMode ?? "?", bins[2], bins[5], bins[6],
+                                hints.auxPowerW ?? 500, hints.consumptionKwhPer100 ?? 0))
+        } else if let implied = hints.consumptionKwhPer100,
            let baselineWhPerM = consumptionParams.mean(of: "vehicle_consumption_values_wh_per_m"),
            baselineWhPerM > 0 {
             // Wh per metre == kWh per km, so x100 gives kWh/100 km.
