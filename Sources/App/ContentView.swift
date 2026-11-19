@@ -66,7 +66,9 @@ struct ContentView: View {
                         row("Ladeeffekt", String(format: "×%.2f (×1,00 = kurven ved %.0f °C)", x, m.referenceTempC ?? 6))
                     }
                     let bins = (m.chargeCurveKw ?? []).compactMap { $0 }.count
-                    row("Ladekurve", bins > 0 ? "lært: \(bins)/11 punkter (\(m.chargeSessions ?? 0) ladninger)" : "endnu ikke lært")
+                    let kind = m.chargeCurveWarm == true ? "varmt batteri" : "koldt batteri"
+                    row("Ladekurve", bins > 0 ? "lært, \(kind): \(bins)/11 punkter (\(m.chargeSessions ?? 0) ladninger)" : "endnu ikke lært")
+                    if let w = m.batteryWarm { row("Batteri", w ? "varmt (kørt inden for 45 min)" : "koldt") }
                 }
             }
             Text(liveNote).font(.footnote).foregroundStyle(.secondary)
@@ -103,7 +105,7 @@ struct ContentView: View {
                     if let peak = points.map(\.kw).max() {
                         row("Spids", "\(Int(peak.rounded())) kW")
                     }
-                    Text("Grønne punkter er lært af dine egne hurtigladninger. Grå er estimater (kurven ved 6 °C, justeret efter udetemperaturen).")
+                    Text("Grønne punkter er lært af dine egne hurtigladninger. Grå er skøn: den lærte kurve forlænget med grundkurvens form, eller grundkurven justeret efter udetemperaturen, hvis intet er lært.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             }

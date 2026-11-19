@@ -33,6 +33,10 @@ struct ModelHints: Sendable, Codable {
     /// nil entries are not learned yet and fall back to baseline x scale.
     var chargeCurveKw: [Double?]?
     var chargeSessions: Int?
+    /// True when the car was driven within the last ~45 min (battery warm).
+    var batteryWarm: Bool?
+    /// True when `chargeCurveKw` is the curve learned from warm-battery sessions.
+    var chargeCurveWarm: Bool?
 }
 
 extension JSONObject {
@@ -78,6 +82,21 @@ extension JSONObject {
 }
 
 extension VehicleProfile {
+    /// Learned power where we have it; elsewhere the baseline SHAPE anchored to the nearest
+    /// learned bin (learned x baseline[i]/baseline[j]). Using the plain baseline there made a
+    /// cliff, e.g. 65 kW learned at 70 % next to 30 kW cold-scaled baseline at 80 %.
+    static func mergeCurve(learnedKw: [Double?], baselineW: [Double]) -> [Double] {
+        let n = min(learnedKw.count, baselineW.count)
+        let learned = (0..<n).compactMap { i in learnedKw[i].map { (i, min(250, max(5, $0)) * 1000) } }
+        guard !learned.isEmpty else { return baselineW }
+        return (0..<n).map { i in
+            if let kw = learnedKw[i] { return min(250, max(5, kw)) * 1000 }
+            let (j, wj) = learned.min { abs($0.0 - i) < abs($1.0 - i) }!
+            guard baselineW[j] > 0 else { return baselineW[i] }
+            return max(5000, min(250_000, wj * baselineW[i] / baselineW[j]))
+        }
+    }
+
     /// Returns the adapted profile and a one-line description for the log.
     func adjusted(with hints: ModelHints?) -> (profile: VehicleProfile, note: String) {
         guard let hints else { return (self, "baseline profile (no model hints)") }
@@ -104,7 +123,8 @@ extension VehicleProfile {
            let baselineWhPerM = consumptionParams.mean(of: "vehicle_consumption_values_wh_per_m"),
            baselineWhPerM > 0 {
             // Wh per metre == kWh per km, so x100 gives kWh/100 km.
-            let factor = min(1.5, max(0.8, implied / (baselineWhPerM * 100)))
+            // Winter consumption can be ~1.7x the baseline vector; a tighter clamp made Maps optimistic.
+            let factor = min(2.0, max(0.7, implied / (baselineWhPerM * 100)))
             consumptionParams = consumptionParams.scalingArray("vehicle_consumption_values_wh_per_m", by: factor)
             let source = hints.consumptionSource == "learned"
                 ? "learned over \(Int(hints.learnedKm ?? 0)) km" : "car estimate"
@@ -122,16 +142,11 @@ extension VehicleProfile {
         // Learned DC curve overrides the baseline per SoC decile where we have real data.
         if let curve = hints.chargeCurveKw, curve.count == 11,
            let base = chargeParams.numbers("vehicle_charge_axis_w"), base.count == 11 {
-            var merged = base
-            var learnedBins = 0
-            for i in 0..<11 {
-                if let kw = curve[i] {
-                    merged[i] = min(250, max(5, kw)) * 1000
-                    learnedBins += 1
-                }
-            }
+            let merged = VehicleProfile.mergeCurve(learnedKw: curve, baselineW: base)
+            let learnedBins = curve.compactMap { $0 }.count
             chargeParams = chargeParams.replacingArray("vehicle_charge_axis_w", with: merged)
-            notes.append("charge curve learned (\(learnedBins)/11 bins, \(hints.chargeSessions ?? 0) sessions)")
+            let kind = hints.chargeCurveWarm == true ? "warm" : "cold"
+            notes.append("charge curve learned, \(kind) battery (\(learnedBins)/11 bins, \(hints.chargeSessions ?? 0) sessions)")
         }
 
         let adjusted = VehicleProfile(

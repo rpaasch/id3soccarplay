@@ -45,12 +45,14 @@ enum StatusError: Error, CustomStringConvertible {
 enum StatusClient {
     static let url = URL(string: "https://id3.78fvr47qyz.workers.dev/status")!
 
-    /// Fetches the current state from the Worker. Short timeout: Maps is waiting.
-    /// A dropped connection (-1005, common when an extension was just resumed) is retried once.
-    static func fetch(timeout: TimeInterval = 3) async throws -> VehicleState {
+    /// Fetches the current state from the Worker.
+    /// A dropped connection (-1005, common when an extension was just resumed) is retried once;
+    /// with `retryOnTimeout` (background updates, nobody waiting) a timeout is retried too.
+    static func fetch(timeout: TimeInterval = 3, retryOnTimeout: Bool = false) async throws -> VehicleState {
         do {
             return try await fetchOnce(timeout: timeout)
-        } catch let error as URLError where error.code == .networkConnectionLost {
+        } catch let error as URLError where error.code == .networkConnectionLost
+                    || (retryOnTimeout && error.code == .timedOut) {
             try await Task.sleep(for: .milliseconds(300))
             return try await fetchOnce(timeout: timeout)
         }
@@ -80,13 +82,33 @@ enum StatusClient {
     }
 }
 
+/// Process-wide memo of the last live answer. Maps fires bursts of up to ~20 requests within
+/// seconds; answering them from a fresh (< 15 s) result avoids a network round trip each time.
+private final class RecentState: @unchecked Sendable {
+    static let shared = RecentState()
+    private let lock = NSLock()
+    private var value: (state: VehicleState, at: Date)?
+    func get(maxAge: TimeInterval) -> VehicleState? {
+        lock.lock(); defer { lock.unlock() }
+        guard let v = value, Date().timeIntervalSince(v.at) < maxAge else { return nil }
+        return v.state
+    }
+    func set(_ s: VehicleState) {
+        lock.lock(); defer { lock.unlock() }
+        value = (s, Date())
+    }
+}
+
 enum StateProvider {
     enum Origin: String { case live, cache }
 
-    /// Best available state: live from the Worker, else the last cached one, else nil.
-    static func current(timeout: TimeInterval = 2.5) async -> (state: VehicleState, origin: Origin)? {
+    /// Best available state: live from the Worker (or a < 15 s old live answer), else the last
+    /// cached one, else nil. Background updates pass a longer timeout and retry on timeout.
+    static func current(timeout: TimeInterval = 2.5, background: Bool = false) async -> (state: VehicleState, origin: Origin)? {
+        if !background, let recent = RecentState.shared.get(maxAge: 15) { return (recent, .live) }
         do {
-            let state = try await StatusClient.fetch(timeout: timeout)
+            let state = try await StatusClient.fetch(timeout: timeout, retryOnTimeout: background)
+            RecentState.shared.set(state)
             SharedStore.setCodable(state, for: .lastState)
             return (state, .live)
         } catch {

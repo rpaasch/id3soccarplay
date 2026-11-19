@@ -130,7 +130,8 @@ private final class UpdateCoordinator: @unchecked Sendable {
         var lastPushed: VehicleState?
         while !Task.isCancelled {
             guard currentObserver(for: generation) != nil else { return } // superseded or stopped
-            if let profile = try? VehicleProfile.load(), let current = await StateProvider.current() {
+            if let profile = try? VehicleProfile.load(),
+               let current = await StateProvider.current(timeout: 6, background: true) {
                 let s = current.state
                 if PowerLevelHandler.shouldPush(new: s, last: lastPushed),
                    let target = currentObserver(for: generation) {
