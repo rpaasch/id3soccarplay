@@ -795,6 +795,7 @@ async function cronTick(env) {
 const SHAPE_TESTS = {
   "test-fast": [0.7, 0.7, 0.7, 0.7, 1, 1, 1, 1.45, 1.45, 1.45],
   "test-slow": [1.45, 1.45, 1.45, 1.45, 1, 1, 1, 0.7, 0.7, 0.7],
+  "test-mid": [1, 1, 1, 1, 1, 1.6, 1.6, 1, 1, 1], // only ~100-140 km/h if bins are ~20 km/h wide
 };
 const SHAPE_BINS = { city: [0, 1, 2, 3], road: [4, 5, 6], motorway: [7, 8, 9] };
 
@@ -818,7 +819,7 @@ async function shapeEndpoint(request, env) {
   if (!env.STATUS_TOKEN || token !== env.STATUS_TOKEN) return new Response("unauthorized", { status: 401 });
   const set = url.searchParams.get("set");
   if (set !== null) {
-    if (!["off", "learned", ...Object.keys(SHAPE_TESTS)].includes(set)) return new Response("set must be off|learned|test-fast|test-slow", { status: 400 });
+    if (!["off", "learned", ...Object.keys(SHAPE_TESTS)].includes(set)) return new Response("set must be off|learned|test-fast|test-slow|test-mid", { status: 400 });
     await kvPut(env, "consumption_shape_mode", set);
   }
   const mode = (await env.STATE.get("consumption_shape_mode")) || "off";
