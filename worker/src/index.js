@@ -336,6 +336,8 @@ async function smartcarWebhook(request, env) {
 async function storeSnapshotIfNewer(env, snap) {
   const cur = await env.STATE.get("snapshot", "json");
   if (cur && cur.measuredAt && snap.measuredAt && cur.measuredAt > snap.measuredAt) return false;
+  // A webhook knows nothing about the charge type: keep what the last poll found while charging continues.
+  if (cur && cur.charging === true && snap.charging === true && !snap.chargeKind && cur.chargeKind) snap.chargeKind = cur.chargeKind;
   // Same measurement again (polls while parked): nothing new, so spend no KV writes (free tier: 1000/day).
   if (cur && cur.measuredAt === snap.measuredAt && ["soc", "charging", "wattageW", "odometerKm", "rangeKm", "minutesToFull", "chargeKind", "connector"]
       .every(k => cur[k] === snap[k])) return false;
@@ -628,14 +630,29 @@ async function learnCharging(env, snap, tempC) {
   let sess = await env.STATE.get("charge_session", "json");
 
   if (snap.charging === true) {
-    if (kw == null) return; // no power reading with this measurement
     sess = sess || { startedAt: snap.measuredAt, maxKw: 0, samples: [], band: tempBand(tempC) };
-    const last = sess.samples[sess.samples.length - 1];
+    let last = sess.samples[sess.samples.length - 1];
+    // Webhooks carry SoC but no power. Derive battery-side power from the SoC slope between
+    // two measurements (each SoC step is a rounding boundary, so the slope is accurate).
+    let power = kw, derived = false;
+    if (power == null) {
+      if (!last || snap.soc <= last.soc || snap.measuredAt - last.t < 30000) return;
+      const net = await netCapacityKwh(env);
+      power = ((snap.soc - last.soc) * net) / ((snap.measuredAt - last.t) / 3600000);
+      if (!(power > 1 && power < 400)) return;
+      derived = true;
+    }
+    if (last && last.t === snap.measuredAt && last.derived && !derived) {
+      sess.samples.pop(); // a real power reading replaces the derived one for the same measurement
+      last = sess.samples[sess.samples.length - 1];
+    }
     if (last && last.t >= snap.measuredAt) return;
-    const sample = { t: snap.measuredAt, soc: snap.soc, kw: Math.round(kw * 10) / 10 };
+    const sample = { t: snap.measuredAt, soc: snap.soc, kw: Math.round(power * 10) / 10 };
+    if (derived) sample.derived = true;
+    const kwUsed = power;
     if (typeof snap.energyAddedKwh === "number") sample.kwh = snap.energyAddedKwh;
     sess.samples.push(sample);
-    sess.maxKw = Math.max(sess.maxKw, kw);
+    sess.maxKw = Math.max(sess.maxKw, kwUsed);
     if (snap.connector && snap.connector !== "invalid") {
       sess.connector = snap.connector;
       const seen = (await env.STATE.get("connectors_seen", "json")) || {};
