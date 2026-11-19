@@ -37,6 +37,11 @@ struct ModelHints: Sendable, Codable {
     var batteryWarm: Bool?
     /// True when `chargeCurveKw` is the curve learned from warm-battery sessions.
     var chargeCurveWarm: Bool?
+    /// 10 multipliers applied element-wise to Maps' consumption values (hypothesis: speed bins,
+    /// slow -> fast). The mean is rescaled afterwards, so the shape only redistributes.
+    var consumptionShape: [Double]?
+    /// "learned", "test-fast" or "test-slow".
+    var consumptionShapeMode: String?
 }
 
 extension JSONObject {
@@ -68,6 +73,12 @@ extension JSONObject {
         var f = fields
         f[key] = .array(values.map { .number($0) })
         return JSONObject(fields: f)
+    }
+
+    /// Copy with the array under `key` multiplied element-wise by `factors` (same length only).
+    func multiplyingArray(_ key: String, by factors: [Double]) -> JSONObject {
+        guard let values = numbers(key), values.count == factors.count else { return self }
+        return replacingArray(key, with: zip(values, factors).map { $0 * min(2.5, max(0.4, $1)) })
     }
 
     /// Mean of the numbers in the array under `key` (nil if absent/empty).
@@ -119,6 +130,10 @@ extension VehicleProfile {
 
         // Consumption: scale the whole vector so its mean matches the car's own estimate.
         var consumptionParams = consumptionContract.vehicleParameters
+        if let shape = hints.consumptionShape, shape.count == 10 {
+            consumptionParams = consumptionParams.multiplyingArray("vehicle_consumption_values_wh_per_m", by: shape)
+            notes.append("shape \(hints.consumptionShapeMode ?? "?")")
+        }
         if let implied = hints.consumptionKwhPer100,
            let baselineWhPerM = consumptionParams.mean(of: "vehicle_consumption_values_wh_per_m"),
            baselineWhPerM > 0 {

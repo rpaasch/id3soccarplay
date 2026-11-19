@@ -36,6 +36,7 @@ export default {
       if (p === "/status") return statusEndpoint(request, env, ctx);
       if (p === "/learn") return learnEndpoint(request, env);
       if (p === "/trim") return trimEndpoint(request, env);
+      if (p === "/shape") return shapeEndpoint(request, env);
       if (p === "/health") return new Response("ok", { status: 200 });
       return new Response("Not found", { status: 404 });
     } catch (e) {
@@ -786,6 +787,44 @@ async function cronTick(env) {
   await pollSafely(env);
 }
 
+// ---------- Consumption shape over Maps' 10 consumption values ----------
+// Hypothesis (being tested): the 10 values are speed bins, slow -> fast. Assumed mapping:
+// 0-3 city, 4-6 country road, 7-9 motorway. The app multiplies the baseline vector by the
+// shape element-wise and then rescales its mean to the consumption figure, so a shape only
+// redistributes consumption between speeds; the overall mean is unchanged.
+const SHAPE_TESTS = {
+  "test-fast": [0.7, 0.7, 0.7, 0.7, 1, 1, 1, 1.45, 1.45, 1.45],
+  "test-slow": [1.45, 1.45, 1.45, 1.45, 1, 1, 1, 0.7, 0.7, 0.7],
+};
+const SHAPE_BINS = { city: [0, 1, 2, 3], road: [4, 5, 6], motorway: [7, 8, 9] };
+
+function consumptionShape(mode, bySpeed) {
+  if (SHAPE_TESTS[mode]) return SHAPE_TESTS[mode];
+  if (mode !== "learned" || !bySpeed) return null;
+  const vals = Object.values(bySpeed).map((c) => c.kwhPer100).filter((v) => v > 0);
+  if (vals.length < 2) return null; // need at least two speed classes to say anything
+  const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+  const shape = Array(10).fill(1);
+  for (const [cls, idx] of Object.entries(SHAPE_BINS)) {
+    const v = bySpeed[cls]?.kwhPer100;
+    if (v > 0) for (const i of idx) shape[i] = Math.round(Math.min(1.8, Math.max(0.55, v / mean)) * 100) / 100;
+  }
+  return shape;
+}
+
+async function shapeEndpoint(request, env) {
+  const url = new URL(request.url);
+  const token = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || url.searchParams.get("token");
+  if (!env.STATUS_TOKEN || token !== env.STATUS_TOKEN) return new Response("unauthorized", { status: 401 });
+  const set = url.searchParams.get("set");
+  if (set !== null) {
+    if (!["off", "learned", ...Object.keys(SHAPE_TESTS)].includes(set)) return new Response("set must be off|learned|test-fast|test-slow", { status: 400 });
+    await kvPut(env, "consumption_shape_mode", set);
+  }
+  const mode = (await env.STATE.get("consumption_shape_mode")) || "off";
+  return new Response(JSON.stringify({ mode, tests: SHAPE_TESTS, bins: SHAPE_BINS }), { headers: { "content-type": "application/json" } });
+}
+
 async function trimEndpoint(request, env) {
   const url = new URL(request.url);
   const token = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || url.searchParams.get("token");
@@ -895,13 +934,14 @@ async function outdoorTemp(env, ctx) {
 
 async function buildModel(env, snap, ctx) {
   // Independent reads run in parallel: sequential cold KV reads were what made /status slow.
-  const [grossRaw, ti, estPrev, trimCarRaw, trimLearnedRaw, recentDrive] = await Promise.all([
+  const [grossRaw, ti, estPrev, trimCarRaw, trimLearnedRaw, recentDrive, shapeMode] = await Promise.all([
     kvTextCached(env, "sc_capacity", 300),
     outdoorTempInfo(env, ctx),
     kvJsonCached(env, "cons_estimate"),
     kvTextCached(env, "consumption_trim"),
     kvTextCached(env, "consumption_trim_learned"),
     env.STATE.get("recent_drive", "json"),
+    env.STATE.get("consumption_shape_mode"),
   ]);
   const warm = !!(recentDrive && Date.now() - recentDrive.at < 45 * 60 * 1000);
   const net = Math.round((Number(grossRaw) || 82) * 0.94);
@@ -943,6 +983,8 @@ async function buildModel(env, snap, ctx) {
     model.consumptionKwhPer100 = Math.round(model.consumptionKwhPer100 * trim * 10) / 10;
   }
   if (Object.keys(bySpeed).length) model.consumptionBySpeed = bySpeed;
+  const shape = consumptionShape(shapeMode || "off", bySpeed);
+  if (shape) { model.consumptionShape = shape; model.consumptionShapeMode = shapeMode; }
   if (cc) { model.chargeCurveKw = cc.curveKw; model.chargeSessions = cc.sessions; model.chargeCurveWarm = !!cc.warm; }
   model.batteryWarm = warm;
   return model;

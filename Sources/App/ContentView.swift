@@ -61,6 +61,7 @@ struct ContentView: View {
                         row(label, String(format: "%.1f kWh/100 km", k))
                     }
                     if m.consumptionSource == "learned", let km = m.learnedKm { row("Lært over", "\(Int(km)) km") }
+                    if let mode = m.consumptionShapeMode { row("Forbrug efter fart", mode == "learned" ? "lært" : "test: \(mode)") }
                     if let t = m.temperatureC { row("Udetemperatur", String(format: "%.1f °C", t)) }
                     if let x = m.chargePowerScale {
                         row("Ladeeffekt", String(format: "×%.2f (×1,00 = kurven ved %.0f °C)", x, m.referenceTempC ?? 6))
