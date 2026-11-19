@@ -710,8 +710,8 @@ async function cronTick(env) {
   // Unknown wattage at charging start counts as possibly DC, so the first minutes of a
   // fast charge are sampled. Only a known low power (AC) slows polling to ~30 min.
   const knownAc = snap.wattageW != null && snap.wattageW / 1000 < DC_MIN_KW;
-  // DC/unknown: every ~5 min (Smartcar's VW data refreshes every 4-5 min). AC: every ~30 min.
-  if (Date.now() - lastPoll < (knownAc ? 28 : 4.5) * 60 * 1000) return;
+  // DC/unknown: every ~2 min (cron runs each minute; identical measurements cost no KV writes). AC: every ~30 min.
+  if (Date.now() - lastPoll < (knownAc ? 28 : 1.9) * 60 * 1000) return;
   await pollSafely(env);
 }
 
