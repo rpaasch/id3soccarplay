@@ -611,7 +611,7 @@ async function learnSpeed(env, iv, tempC) {
 }
 
 async function learnedSpeedConsumption(env, tempC) {
-  const band = ((await env.STATE.get("learn_cons_speed", "json")) || {})[tempBand(tempC)];
+  const band = ((await kvJsonCached(env, "learn_cons_speed")) || {})[tempBand(tempC)];
   const out = {};
   for (const [cls, c] of Object.entries(band || {})) {
     if (c.km >= 15) out[cls] = { kwhPer100: Math.round((c.kwh / c.km) * 1000) / 10, km: Math.round(c.km), avgKmh: Math.round(c.km / (c.ms / 3600000)) };
@@ -620,7 +620,7 @@ async function learnedSpeedConsumption(env, tempC) {
 }
 
 async function learnedConsumption(env, tempC) {
-  const b = ((await env.STATE.get("learn_cons", "json")) || {})[tempBand(tempC)];
+  const b = ((await kvJsonCached(env, "learn_cons")) || {})[tempBand(tempC)];
   if (!b || b.km < 40) return null;
   return { value: Math.round((b.kwh / b.km) * 1000) / 10, km: Math.round(b.km) };
 }
@@ -714,7 +714,7 @@ function percentile(arr, p) {
 }
 
 async function learnedChargeCurve(env, tempC) {
-  const d = await env.STATE.get(`learn_charge_${tempBand(tempC)}`, "json");
+  const d = await kvJsonCached(env, `learn_charge_${tempBand(tempC)}`);
   if (!d) return null;
   const curve = d.bins.map((v) => (v.length ? Math.round(percentile(v, 0.8) * 10) / 10 : null));
   return curve.filter((x) => x != null).length >= 3 ? { curveKw: curve, sessions: d.sessions || 0 } : null;
@@ -805,15 +805,20 @@ async function refreshWeather(env) {
   } catch { return null; }
 }
 
+// Rarely-changing keys: let Cloudflare's edge cache answer (cacheTtl >= 30 s) instead of a cold
+// KV round trip. /status must be fast: Maps waits for it, and a slow answer means a timeout.
+const kvJsonCached = (env, key, ttl = 60) => env.STATE.get(key, { type: "json", cacheTtl: ttl });
+const kvTextCached = (env, key, ttl = 60) => env.STATE.get(key, { type: "text", cacheTtl: ttl });
+
 async function outdoorTempInfo(env, ctx) {
-  const car = await env.STATE.get("car_temp", "json");
+  const car = await kvJsonCached(env, "car_temp");
   if (car && Date.now() - car.at < 3 * 3600 * 1000) return { t: car.t, source: "car" };
   const t = await outdoorTemp(env, ctx);
   return { t, source: "weather" };
 }
 
 async function outdoorTemp(env, ctx) {
-  const c = await env.STATE.get("weather", "json");
+  const c = await kvJsonCached(env, "weather");
   if (c && Date.now() - c.at < WEATHER_TTL_MS) return c.t;
   if (c) { // stale: answer now, refresh for next time
     if (ctx && ctx.waitUntil) ctx.waitUntil(refreshWeather(env));
@@ -823,11 +828,16 @@ async function outdoorTemp(env, ctx) {
 }
 
 async function buildModel(env, snap, ctx) {
-  const gross = Number(await env.STATE.get("sc_capacity")) || 82;
-  const net = Math.round(gross * 0.94);
+  // Independent reads run in parallel: sequential cold KV reads were what made /status slow.
+  const [grossRaw, ti, estPrev, trimCarRaw, trimLearnedRaw] = await Promise.all([
+    kvTextCached(env, "sc_capacity", 300),
+    outdoorTempInfo(env, ctx),
+    kvJsonCached(env, "cons_estimate"),
+    kvTextCached(env, "consumption_trim"),
+    kvTextCached(env, "consumption_trim_learned"),
+  ]);
+  const net = Math.round((Number(grossRaw) || 82) * 0.94);
   const model = { capacityKwhNet: net, referenceTempC: REF_TEMP_C };
-
-  const ti = await outdoorTempInfo(env, ctx);
   const t = ti.t;
   if (typeof t === "number") {
     model.temperatureC = Math.round(t * 10) / 10;
@@ -842,30 +852,29 @@ async function buildModel(env, snap, ctx) {
     // Remember it: below 15 % range/SoC is too noisy to trust, but Maps still needs a realistic
     // number exactly then. Written rarely (>= 3 % change or older than 6 h) to spare KV writes.
     try {
-      const prev = await env.STATE.get("cons_estimate", "json");
+      const prev = estPrev;
       if (!prev || Math.abs(prev.v - model.consumptionKwhPer100) / prev.v >= 0.03 || Date.now() - prev.at > 6 * 3600 * 1000) {
         await env.STATE.put("cons_estimate", JSON.stringify({ v: model.consumptionKwhPer100, at: Date.now() }));
       }
     } catch { /* best effort */ }
   } else if (snap) {
-    const prev = await env.STATE.get("cons_estimate", "json");
+    const prev = estPrev;
     if (prev && typeof prev.v === "number") { model.consumptionKwhPer100 = prev.v; model.consumptionSource = "car-estimate"; }
   }
   // Real driving beats the car's estimate once we have >= 40 km in this temperature band.
-  const lc = await learnedConsumption(env, t);
+  const [lc, bySpeed, cc] = await Promise.all([
+    learnedConsumption(env, t), learnedSpeedConsumption(env, t), learnedChargeCurve(env, t),
+  ]);
   if (lc) { model.consumptionKwhPer100 = lc.value; model.consumptionSource = "learned"; model.learnedKm = lc.km; }
   // Calibration against Maps' own predictions (see /trim). Maps follows the numbers it is
   // given, so if its arrival SoC is consistently too optimistic this factor lifts them.
   const isLearned = model.consumptionSource === "learned";
-  const trim = Number(await env.STATE.get(isLearned ? "consumption_trim_learned" : "consumption_trim"))
-    || (isLearned ? 1.0 : DEFAULT_CONSUMPTION_TRIM);
+  const trim = Number(isLearned ? trimLearnedRaw : trimCarRaw) || (isLearned ? 1.0 : DEFAULT_CONSUMPTION_TRIM);
   if (model.consumptionKwhPer100) {
     model.consumptionTrim = trim;
     model.consumptionKwhPer100 = Math.round(model.consumptionKwhPer100 * trim * 10) / 10;
   }
-  const bySpeed = await learnedSpeedConsumption(env, t);
   if (Object.keys(bySpeed).length) model.consumptionBySpeed = bySpeed;
-  const cc = await learnedChargeCurve(env, t);
   if (cc) { model.chargeCurveKw = cc.curveKw; model.chargeSessions = cc.sessions; }
   return model;
 }
@@ -875,8 +884,10 @@ async function statusEndpoint(request, env, ctx) {
   const token = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || url.searchParams.get("token");
   if (!env.STATUS_TOKEN || token !== env.STATUS_TOKEN) return new Response("unauthorized", { status: 401 });
 
-  let snap = await env.STATE.get("snapshot", "json");
-  const lastPoll = Number((await env.STATE.get("last_poll_at")) || 0);
+  let [snap, lastPollRaw, lastErrorRaw] = await Promise.all([
+    env.STATE.get("snapshot", "json"), env.STATE.get("last_poll_at"), env.STATE.get("last_poll_error"),
+  ]);
+  const lastPoll = Number(lastPollRaw || 0);
   const force = url.searchParams.get("refresh") === "1";
   // Fresh or charging: poll often. Parked with old data: every 15 min is plenty (saves KV writes).
   const active = snap && (snap.charging === true || Date.now() - (snap.measuredAt || 0) < 15 * 60 * 1000);
@@ -891,7 +902,7 @@ async function statusEndpoint(request, env, ctx) {
     }
   }
 
-  const lastError = (await env.STATE.get("last_poll_error")) || null;
+  const lastError = lastErrorRaw || null;
   if (!snap) {
     return new Response(JSON.stringify({ available: false, lastError }), { headers: { "content-type": "application/json" } });
   }
