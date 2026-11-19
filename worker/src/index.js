@@ -839,6 +839,17 @@ async function buildModel(env, snap, ctx) {
     const kmAt100 = snap.rangeKm / snap.soc;
     model.consumptionKwhPer100 = Math.round((net * 100 / kmAt100) * 10) / 10;
     model.consumptionSource = "car-estimate";
+    // Remember it: below 15 % range/SoC is too noisy to trust, but Maps still needs a realistic
+    // number exactly then. Written rarely (>= 3 % change or older than 6 h) to spare KV writes.
+    try {
+      const prev = await env.STATE.get("cons_estimate", "json");
+      if (!prev || Math.abs(prev.v - model.consumptionKwhPer100) / prev.v >= 0.03 || Date.now() - prev.at > 6 * 3600 * 1000) {
+        await env.STATE.put("cons_estimate", JSON.stringify({ v: model.consumptionKwhPer100, at: Date.now() }));
+      }
+    } catch { /* best effort */ }
+  } else if (snap) {
+    const prev = await env.STATE.get("cons_estimate", "json");
+    if (prev && typeof prev.v === "number") { model.consumptionKwhPer100 = prev.v; model.consumptionSource = "car-estimate"; }
   }
   // Real driving beats the car's estimate once we have >= 40 km in this temperature band.
   const lc = await learnedConsumption(env, t);
