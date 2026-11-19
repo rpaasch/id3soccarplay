@@ -150,7 +150,7 @@ async function ciUpload(request, env) {
   const url = new URL(request.url);
   const body = await request.arrayBuffer();
   if (!body || body.byteLength < 1000) return new Response("empty/small ipa", { status: 400 });
-  await env.STATE.put("ipa", body);
+  await env.STATE.put("ipa", body); // CI: must fail loudly
   const m = {
     version: url.searchParams.get("version") || "0.1.0",
     build: url.searchParams.get("build") || "?",
@@ -158,7 +158,7 @@ async function ciUpload(request, env) {
     uploadedAt: Date.now(),
     bytes: body.byteLength,
   };
-  await env.STATE.put("meta", JSON.stringify(m));
+  await env.STATE.put("meta", JSON.stringify(m)); // CI: must fail loudly
   return new Response(JSON.stringify({ ok: true, ...m }), {
     headers: { "content-type": "application/json" },
   });
@@ -270,8 +270,8 @@ async function oauthCallback(request, env) {
   if (err) return htmlMsg("Afvist", `Smartcar returnerede: ${err} — ${url.searchParams.get("error_description") || ""}`);
   const userId = url.searchParams.get("user_id");
   if (!userId) return htmlMsg("Mangler user_id", "Ingen user_id i callback. Tjek at redirect-URI og application_id er korrekte.");
-  await env.STATE.put("smartcar_user_id", userId);
-  await env.STATE.put("smartcar_connection", JSON.stringify({ userId, connectedAt: Date.now() }));
+  await kvPut(env, "smartcar_user_id", userId);
+  await kvPut(env, "smartcar_connection", JSON.stringify({ userId, connectedAt: Date.now() }));
   return htmlMsg("Forbundet ✅", "Din bil er koblet til. Du kan lukke denne side. Næste skridt (jeg guider dig) er at tilføje en webhook i Smartcar-dashboardet, så batteriniveauet skubbes hertil.");
 }
 
@@ -315,15 +315,15 @@ async function smartcarWebhook(request, env) {
   // Never let that reach the snapshot Maps reads.
   const isTest = String(evt?.meta?.mode || "").toUpperCase() === "TEST" || evt?.data?.vehicle?.mode === "test";
   if (isTest) {
-    await env.STATE.put("smartcar_last_test_event", raw);
+    await kvPut(env, "smartcar_last_test_event", raw);
     return new Response("ok", { status: 200 });
   }
 
   if (evt.eventType !== "VEHICLE_STATE") {
-    await env.STATE.put("smartcar_last_other_event", raw); // e.g. VEHICLE_ERROR for signals the car lacks
+    await kvPut(env, "smartcar_last_other_event", raw); // e.g. VEHICLE_ERROR for signals the car lacks
     return new Response("ok", { status: 200 });
   }
-  await env.STATE.put("smartcar_last_event", raw);
+  await kvPut(env, "smartcar_last_event", raw);
   const snap = extractSnapshot(evt);
   if (snap) {
     snap.source = "webhook";
@@ -334,6 +334,8 @@ async function smartcarWebhook(request, env) {
 
 // Keep whichever measurement is newest (webhook pushes and polls race).
 async function storeSnapshotIfNewer(env, snap) {
+  if (!memSnap || (snap.measuredAt || 0) > (memSnap.measuredAt || 0)) memSnap = snap;
+  else if (snap.measuredAt === memSnap.measuredAt) memSnap = { ...memSnap, ...snap }; // poll adds power etc.
   const cur = await env.STATE.get("snapshot", "json");
   if (cur && cur.measuredAt && snap.measuredAt && cur.measuredAt > snap.measuredAt) return false;
   // A webhook knows nothing about the charge type: keep what the last poll found while charging continues.
@@ -341,7 +343,7 @@ async function storeSnapshotIfNewer(env, snap) {
   // Same measurement again (polls while parked): nothing new, so spend no KV writes (free tier: 1000/day).
   if (cur && cur.measuredAt === snap.measuredAt && ["soc", "charging", "wattageW", "odometerKm", "rangeKm", "minutesToFull", "chargeKind", "connector"]
       .every(k => cur[k] === snap[k])) return false;
-  await env.STATE.put("snapshot", JSON.stringify(snap));
+  await kvPut(env, "snapshot", JSON.stringify(snap));
   await learn(env, snap);
   return true;
 }
@@ -402,7 +404,7 @@ async function scAppToken(env) {
   if (!res.ok) throw new Error("smartcar token HTTP " + res.status);
   const j = await res.json();
   const ttl = Math.max(60, (j.expires_in || 3600) - 120);
-  await env.STATE.put("sc_app_token", JSON.stringify({ token: j.access_token, expiresAt: Date.now() + ttl * 1000 }), { expirationTtl: ttl });
+  await kvPut(env, "sc_app_token", JSON.stringify({ token: j.access_token, expiresAt: Date.now() + ttl * 1000 }), { expirationTtl: ttl });
   return j.access_token;
 }
 
@@ -418,7 +420,7 @@ async function scVehicle(env, token, forceRefresh) {
   const c = (j.data || []).find((x) => x.attributes?.status?.name === "ACTIVE" && x.attributes?.vehicle?.mode === "live");
   if (!c) throw new Error("no active live connection");
   const v = { vehicleId: c.relationships.vehicle.data.id, userId: c.relationships.user.data.id };
-  await env.STATE.put("sc_vehicle", JSON.stringify(v), { expirationTtl: 86400 });
+  await kvPut(env, "sc_vehicle", JSON.stringify(v), { expirationTtl: 86400 });
   return v;
 }
 
@@ -432,7 +434,8 @@ async function scSignal(token, v, code) {
 }
 
 async function pollSmartcar(env, retried) {
-  await env.STATE.put("last_poll_at", String(Date.now()));
+  memLastPoll = Date.now();
+  await kvPut(env, "last_poll_at", String(Date.now()));
   const token = await scAppToken(env);
   const v = await scVehicle(env, token, !!retried);
   const needCap = !(await env.STATE.get("sc_capacity"));
@@ -459,16 +462,16 @@ async function pollSmartcar(env, retried) {
       const rounded = Math.round(c * 10) / 10;
       const prevTemp = await env.STATE.get("car_temp", "json");
       if (!prevTemp || prevTemp.t !== rounded) {
-        await env.STATE.put("car_temp", JSON.stringify({ t: rounded, at: isNaN(when) ? Date.now() : when }));
+        await kvPut(env, "car_temp", JSON.stringify({ t: rounded, at: isNaN(when) ? Date.now() : when }));
       }
     } else {
       // Not enabled / not permitted / car can't report it: don't ask again for 30 min.
-      await env.STATE.put("temp_unavailable", "1", { expirationTtl: 1800 });
+      await kvPut(env, "temp_unavailable", "1", { expirationTtl: 1800 });
     }
   }
   if (cap && cap.attrs?.body && typeof cap.attrs.body.capacity === "number") {
     // Gross kWh as selected in Smartcar Connect (e.g. 82 for an ID.3 Pro S).
-    await env.STATE.put("sc_capacity", String(cap.attrs.body.capacity), { expirationTtl: 86400 });
+    await kvPut(env, "sc_capacity", String(cap.attrs.body.capacity), { expirationTtl: 86400 });
   }
   if (soc.httpError && !retried) return pollSmartcar(env, true); // ids may be stale after a reconnect
   if (soc.httpError) throw new Error("soc HTTP " + soc.httpError);
@@ -497,13 +500,13 @@ async function pollSmartcar(env, retried) {
   if (conn?.attrs?.status?.value === "SUCCESS" && typeof conn.attrs.body?.value === "string") snap.connector = conn.attrs.body.value;
   if (snap.charging) snap.chargeKind = classifyCharge(snap.connector, snap.wattageW);
   await storeSnapshotIfNewer(env, snap);
-  if (await env.STATE.get("last_poll_error")) await env.STATE.put("last_poll_error", "");
+  if (await env.STATE.get("last_poll_error")) await kvPut(env, "last_poll_error", "");
   return snap;
 }
 
 async function pollSafely(env) {
   try { return await pollSmartcar(env); }
-  catch (e) { await env.STATE.put("last_poll_error", `${new Date().toISOString()} ${e.message || e}`); return null; }
+  catch (e) { await kvPut(env, "last_poll_error", `${new Date().toISOString()} ${e.message || e}`); return null; }
 }
 
 // ---------- Learning from real driving and charging ----------
@@ -535,18 +538,24 @@ async function learn(env, snap) {
     const log = (await env.STATE.get("measure_log", "json")) || [];
     const prevEntry = log[log.length - 1];
     log.push({ t: snap.measuredAt, soc: snap.soc, odo: snap.odometerKm ?? null, ch: snap.charging ?? null, kw: snap.wattageW ?? null, src: snap.source });
-    await env.STATE.put("measure_log", JSON.stringify(log.slice(-200)));
+    // Diagnostic only: save at most every 2 min unless something structural changed (KV writes are scarce;
+    // a fast charge reports every 1 pp, ~every 35 s). The charge session keeps its own samples.
+    const structural = !prevEntry || prevEntry.ch !== (snap.charging ?? null) || prevEntry.odo !== (snap.odometerKm ?? null);
+    if (structural || snap.measuredAt - (prevEntry?.savedAt ?? prevEntry?.t ?? 0) >= 2 * 60 * 1000) {
+      log[log.length - 1].savedAt = snap.measuredAt;
+      await kvPut(env, "measure_log", JSON.stringify(log.slice(-200)));
+    }
     const t = (await outdoorTempInfo(env, null)).t;
     // Remember when the car last drove: a battery that was just driven charges much faster than a cold one.
     if (prevEntry && typeof prevEntry.odo === "number" && typeof snap.odometerKm === "number"
         && snap.odometerKm - prevEntry.odo >= 0.3 && snap.charging !== true) {
       const rd = await env.STATE.get("recent_drive", "json");
-      if (!rd || snap.measuredAt - rd.at > 5 * 60 * 1000) await env.STATE.put("recent_drive", JSON.stringify({ at: snap.measuredAt }));
+      if (!rd || snap.measuredAt - rd.at > 5 * 60 * 1000) await kvPut(env, "recent_drive", JSON.stringify({ at: snap.measuredAt }));
     }
     await learnConsumption(env, snap, t);
     await learnCharging(env, snap, t, log);
   } catch (e) {
-    await env.STATE.put("learn_error", `${new Date().toISOString()} ${e.message || e}`);
+    await kvPut(env, "learn_error", `${new Date().toISOString()} ${e.message || e}`);
   }
 }
 
@@ -555,7 +564,11 @@ async function learnConsumption(env, snap, tempC) {
   const prev = await env.STATE.get("learn_anchor", "json");
   const cur = { soc: snap.soc, odo: snap.odometerKm, t: snap.measuredAt, charging: !!snap.charging };
   if (prev && cur.t <= prev.t) return; // not newer information
-  await env.STATE.put("learn_anchor", JSON.stringify(cur));
+  // While parked or charging nothing moves: skip the write unless the odometer or charging state
+  // changed, or the anchor is older than 30 min (saves hundreds of KV writes per fast charge).
+  const moved = !prev || prev.odo !== cur.odo || prev.charging !== cur.charging || cur.t - prev.t > 30 * 60 * 1000;
+  if (!moved) return;
+  await kvPut(env, "learn_anchor", JSON.stringify(cur));
   if (!prev) return;
 
   const dKm = cur.odo - prev.odo;
@@ -575,7 +588,7 @@ async function learnConsumption(env, snap, tempC) {
   pending = pending || { kwh: 0, km: 0, band: tempBand(tempC) };
   pending.kwh += Math.max(0, dSoc) * net;
   pending.km += dKm;
-  if (pending.km < KM_CHUNK) { await env.STATE.put("learn_pending", JSON.stringify(pending)); return; }
+  if (pending.km < KM_CHUNK) { await kvPut(env, "learn_pending", JSON.stringify(pending)); return; }
 
   await env.STATE.delete("learn_pending");
   const cons = (pending.kwh / pending.km) * 100;
@@ -585,7 +598,7 @@ async function learnConsumption(env, snap, tempC) {
   b.kwh += pending.kwh; b.km += pending.km;
   if (b.km > 600) { b.kwh *= 0.8; b.km *= 0.8; } // forget old driving slowly
   all[pending.band] = b;
-  await env.STATE.put("learn_cons", JSON.stringify(all));
+  await kvPut(env, "learn_cons", JSON.stringify(all));
 }
 
 // Consumption by driving speed. Measurements arrive every ~2 min while driving, so
@@ -605,7 +618,7 @@ async function learnSpeed(env, iv, tempC) {
   const net = await netCapacityKwh(env);
   w = w || { kwh: 0, km: 0, ms: 0, band: tempBand(tempC) };
   w.kwh += iv.dSoc * net; w.km += iv.dKm; w.ms += iv.dt;
-  if (w.ms < SPEED_WIN_MS) { await env.STATE.put("learn_speed_win", JSON.stringify(w)); return; }
+  if (w.ms < SPEED_WIN_MS) { await kvPut(env, "learn_speed_win", JSON.stringify(w)); return; }
   await env.STATE.delete("learn_speed_win");
   if (w.km < 3) return; // standing still or parked: nothing to learn from
   const cls = speedClass(w.km / (w.ms / 3600000));
@@ -614,7 +627,7 @@ async function learnSpeed(env, iv, tempC) {
   const c = (band[cls] = band[cls] || { kwh: 0, km: 0, ms: 0 });
   c.kwh += w.kwh; c.km += w.km; c.ms += w.ms;
   if (c.km > 400) { c.kwh *= 0.8; c.km *= 0.8; c.ms *= 0.8; }
-  await env.STATE.put("learn_cons_speed", JSON.stringify(all));
+  await kvPut(env, "learn_cons_speed", JSON.stringify(all));
 }
 
 async function learnedSpeedConsumption(env, tempC) {
@@ -669,7 +682,7 @@ async function learnCharging(env, snap, tempC, log) {
     if (power == null) {
       if (!last) { // first point of a session without a power reading: keep it as the anchor for later slopes
         sess.samples.push({ t: snap.measuredAt, soc: snap.soc, kw: null, anchor: true });
-        await env.STATE.put("charge_session", JSON.stringify(sess));
+        await kvPut(env, "charge_session", JSON.stringify(sess));
         return;
       }
       if (snap.soc <= last.soc || snap.measuredAt - last.t < 30000) return;
@@ -693,9 +706,9 @@ async function learnCharging(env, snap, tempC, log) {
       sess.connector = snap.connector;
       const seen = (await env.STATE.get("connectors_seen", "json")) || {};
       seen[snap.connector] = (seen[snap.connector] || 0) + 1;
-      await env.STATE.put("connectors_seen", JSON.stringify(seen));
+      await kvPut(env, "connectors_seen", JSON.stringify(seen));
     }
-    await env.STATE.put("charge_session", JSON.stringify(sess));
+    await kvPut(env, "charge_session", JSON.stringify(sess));
     return;
   }
   if (snap.charging === false && sess) { // session ended
@@ -712,7 +725,7 @@ async function learnCharging(env, snap, tempC, log) {
     }
     data.sessions = (data.sessions || 0) + 1;
     data.updated = Date.now();
-    await env.STATE.put(key, JSON.stringify(data));
+    await kvPut(env, key, JSON.stringify(data));
   }
 }
 
@@ -741,7 +754,7 @@ async function checkCapacity(env, sess) {
   const list = (await env.STATE.get("capacity_checks", "json")) || [];
   list.push({ at: b.t, kind: classifyCharge(sess.connector, sess.maxKw * 1000), dSocPct: Math.round(dSoc * 100),
     energyKwh: Math.round(dE * 10) / 10, impliedKwh: Math.round((dE / dSoc) * 10) / 10 });
-  await env.STATE.put("capacity_checks", JSON.stringify(list.slice(-20)));
+  await kvPut(env, "capacity_checks", JSON.stringify(list.slice(-20)));
 }
 
 function percentile(arr, p) {
@@ -782,7 +795,7 @@ async function trimEndpoint(request, env) {
     if (raw === null) continue;
     const v = Number(raw);
     if (!(v >= 0.7 && v <= 1.6)) return new Response("trim must be 0.7-1.6", { status: 400 });
-    await env.STATE.put(key, String(v));
+    await kvPut(env, key, String(v));
   }
   return new Response(JSON.stringify({
     carEstimateTrim: Number(await env.STATE.get("consumption_trim")) || DEFAULT_CONSUMPTION_TRIM,
@@ -841,10 +854,22 @@ async function refreshWeather(env) {
     if (!r.ok) return null;
     const t = (await r.json())?.current?.temperature_2m;
     if (typeof t !== "number") return null;
-    await env.STATE.put("weather", JSON.stringify({ t, at: Date.now() }));
+    await kvPut(env, "weather", JSON.stringify({ t, at: Date.now() }));
     return t;
   } catch { return null; }
 }
+
+// KV writes can fail (e.g. the free plan's 1000 writes/day). A failed write must never take
+// /status or the webhook down, so writes are best effort and the newest measurement is also
+// kept in this isolate's memory, which /status prefers when it is newer than KV's copy.
+let kvWriteError = null;
+async function kvPut(env, key, value, opts) {
+  try { await env.STATE.put(key, value, opts); kvWriteError = null; }
+  catch (e) { kvWriteError = `${new Date().toISOString()} ${e.message || e}`; }
+}
+let memSnap = null;
+let memLastPoll = 0;
+const newerSnap = (a, b) => (!a ? b : !b ? a : ((b.measuredAt || 0) > (a.measuredAt || 0) ? b : a));
 
 // Rarely-changing keys: let Cloudflare's edge cache answer (cacheTtl >= 30 s) instead of a cold
 // KV round trip. /status must be fast: Maps waits for it, and a slow answer means a timeout.
@@ -897,7 +922,7 @@ async function buildModel(env, snap, ctx) {
     try {
       const prev = estPrev;
       if (!prev || Math.abs(prev.v - model.consumptionKwhPer100) / prev.v >= 0.03 || Date.now() - prev.at > 6 * 3600 * 1000) {
-        await env.STATE.put("cons_estimate", JSON.stringify({ v: model.consumptionKwhPer100, at: Date.now() }));
+        await kvPut(env, "cons_estimate", JSON.stringify({ v: model.consumptionKwhPer100, at: Date.now() }));
       }
     } catch { /* best effort */ }
   } else if (snap) {
@@ -931,7 +956,8 @@ async function statusEndpoint(request, env, ctx) {
   let [snap, lastPollRaw, lastErrorRaw] = await Promise.all([
     env.STATE.get("snapshot", "json"), env.STATE.get("last_poll_at"), env.STATE.get("last_poll_error"),
   ]);
-  const lastPoll = Number(lastPollRaw || 0);
+  snap = newerSnap(snap, memSnap);
+  const lastPoll = Math.max(Number(lastPollRaw || 0), memLastPoll);
   const force = url.searchParams.get("refresh") === "1";
   // Fresh or charging: poll often. Parked with old data: every 15 min is plenty (saves KV writes).
   const active = snap && (snap.charging === true || Date.now() - (snap.measuredAt || 0) < 15 * 60 * 1000);
@@ -940,7 +966,7 @@ async function statusEndpoint(request, env, ctx) {
   if (due) {
     if (!snap || force) {
       await pollSafely(env); // nothing to show yet: wait for it
-      snap = await env.STATE.get("snapshot", "json");
+      snap = newerSnap(await env.STATE.get("snapshot", "json"), memSnap);
     } else if (ctx && ctx.waitUntil) {
       ctx.waitUntil(pollSafely(env)); // answer fast, refresh for the next call
     }
@@ -952,6 +978,6 @@ async function statusEndpoint(request, env, ctx) {
   }
   const ageSec = Math.round((Date.now() - (snap.measuredAt || snap.receivedAt)) / 1000);
   const model = await buildModel(env, snap, ctx);
-  return new Response(JSON.stringify({ available: true, ageSeconds: ageSec, lastError, model, ...snap }),
+  return new Response(JSON.stringify({ available: true, ageSeconds: ageSec, lastError, kvWriteError, model, ...snap }),
     { headers: { "content-type": "application/json" } });
 }
