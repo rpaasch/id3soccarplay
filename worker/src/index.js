@@ -533,11 +533,18 @@ async function netCapacityKwh(env) {
 async function learn(env, snap) {
   try {
     const log = (await env.STATE.get("measure_log", "json")) || [];
+    const prevEntry = log[log.length - 1];
     log.push({ t: snap.measuredAt, soc: snap.soc, odo: snap.odometerKm ?? null, ch: snap.charging ?? null, kw: snap.wattageW ?? null, src: snap.source });
     await env.STATE.put("measure_log", JSON.stringify(log.slice(-200)));
     const t = (await outdoorTempInfo(env, null)).t;
+    // Remember when the car last drove: a battery that was just driven charges much faster than a cold one.
+    if (prevEntry && typeof prevEntry.odo === "number" && typeof snap.odometerKm === "number"
+        && snap.odometerKm - prevEntry.odo >= 0.3 && snap.charging !== true) {
+      const rd = await env.STATE.get("recent_drive", "json");
+      if (!rd || snap.measuredAt - rd.at > 5 * 60 * 1000) await env.STATE.put("recent_drive", JSON.stringify({ at: snap.measuredAt }));
+    }
     await learnConsumption(env, snap, t);
-    await learnCharging(env, snap, t);
+    await learnCharging(env, snap, t, log);
   } catch (e) {
     await env.STATE.put("learn_error", `${new Date().toISOString()} ${e.message || e}`);
   }
@@ -625,18 +632,47 @@ async function learnedConsumption(env, tempC) {
   return { value: Math.round((b.kwh / b.km) * 1000) / 10, km: Math.round(b.km) };
 }
 
-async function learnCharging(env, snap, tempC) {
+// Was the car driven (>= 8 km in the hour before `startMs`)? Then the battery is warm.
+function detectWarm(log, startMs) {
+  const win = (log || []).filter((e) => typeof e.odo === "number" && e.t <= startMs && e.t >= startMs - 60 * 60 * 1000);
+  if (win.length < 2) return false;
+  const odos = win.map((e) => e.odo);
+  return Math.max(...odos) - Math.min(...odos) >= 8;
+}
+
+// Average power per SoC decile for ONE session, from energy over time between consecutive samples.
+// This cancels the 1 pp quantisation noise of single derived samples (63..113 kW around a true 85).
+function sessionDecileKw(samples, netKwh) {
+  const sum = {};
+  const s = samples.slice().sort((a, b) => a.t - b.t);
+  for (let k = 1; k < s.length; k++) {
+    const a = s[k - 1], b = s[k];
+    const ds = b.soc - a.soc, dt = (b.t - a.t) / 3600000;
+    if (!(ds > 0) || !(dt > 0) || dt > 0.25) continue; // gaps over 15 min are unreliable
+    const i = Math.max(0, Math.min(10, Math.round(((a.soc + b.soc) / 2) * 10)));
+    const e = (sum[i] = sum[i] || { kwh: 0, h: 0 });
+    e.kwh += ds * netKwh; e.h += dt;
+  }
+  return Object.entries(sum).filter(([, e]) => e.h >= 90 / 3600).map(([i, e]) => [Number(i), e.kwh / e.h]);
+}
+
+async function learnCharging(env, snap, tempC, log) {
   const kw = typeof snap.wattageW === "number" ? snap.wattageW / 1000 : null;
   let sess = await env.STATE.get("charge_session", "json");
 
   if (snap.charging === true) {
-    sess = sess || { startedAt: snap.measuredAt, maxKw: 0, samples: [], band: tempBand(tempC) };
+    sess = sess || { startedAt: snap.measuredAt, maxKw: 0, samples: [], band: tempBand(tempC), warm: detectWarm(log, snap.measuredAt) };
     let last = sess.samples[sess.samples.length - 1];
     // Webhooks carry SoC but no power. Derive battery-side power from the SoC slope between
     // two measurements (each SoC step is a rounding boundary, so the slope is accurate).
     let power = kw, derived = false;
     if (power == null) {
-      if (!last || snap.soc <= last.soc || snap.measuredAt - last.t < 30000) return;
+      if (!last) { // first point of a session without a power reading: keep it as the anchor for later slopes
+        sess.samples.push({ t: snap.measuredAt, soc: snap.soc, kw: null, anchor: true });
+        await env.STATE.put("charge_session", JSON.stringify(sess));
+        return;
+      }
+      if (snap.soc <= last.soc || snap.measuredAt - last.t < 30000) return;
       const net = await netCapacityKwh(env);
       power = ((snap.soc - last.soc) * net) / ((snap.measuredAt - last.t) / 3600000);
       if (!(power > 1 && power < 400)) return;
@@ -667,11 +703,11 @@ async function learnCharging(env, snap, tempC) {
     await checkCapacity(env, sess);
     const kind = classifyCharge(sess.connector, sess.maxKw * 1000);
     if (kind !== "dc" || sess.samples.length < 3) return; // AC or too short to learn a curve from
-    const key = `learn_charge_${sess.band}`;
+    const warm = sess.warm === true;
+    const key = `learn_charge_${sess.band}${warm ? "_w" : ""}`; // legacy key without suffix = cold battery
     const data = (await env.STATE.get(key, "json")) || { bins: Array.from({ length: 11 }, () => []), sessions: 0 };
-    for (const sm of sess.samples) {
-      const i = Math.max(0, Math.min(10, Math.round(sm.soc * 10)));
-      data.bins[i].push(sm.kw);
+    for (const [i, kwAvg] of sessionDecileKw(sess.samples, await netCapacityKwh(env))) {
+      data.bins[i].push(Math.round(kwAvg * 10) / 10); // one value per session and decile
       if (data.bins[i].length > 10) data.bins[i].shift();
     }
     data.sessions = (data.sessions || 0) + 1;
@@ -713,11 +749,16 @@ function percentile(arr, p) {
   return a[Math.min(a.length - 1, Math.floor(p * a.length))];
 }
 
-async function learnedChargeCurve(env, tempC) {
-  const d = await kvJsonCached(env, `learn_charge_${tempBand(tempC)}`);
-  if (!d) return null;
-  const curve = d.bins.map((v) => (v.length ? Math.round(percentile(v, 0.8) * 10) / 10 : null));
-  return curve.filter((x) => x != null).length >= 3 ? { curveKw: curve, sessions: d.sessions || 0 } : null;
+async function learnedChargeCurve(env, tempC, warm) {
+  const base = `learn_charge_${tempBand(tempC)}`;
+  const curveOf = (d) => {
+    if (!d) return null;
+    const curve = d.bins.map((v) => (v.length ? Math.round(percentile(v, 0.8) * 10) / 10 : null));
+    return curve.filter((x) => x != null).length >= 3 ? { curveKw: curve, sessions: d.sessions || 0 } : null;
+  };
+  // A recently driven (warm) battery uses its own curve when there is one, else the cold curve (the safe side).
+  if (warm) { const w = curveOf(await kvJsonCached(env, `${base}_w`)); if (w) return { ...w, warm: true }; }
+  return curveOf(await kvJsonCached(env, base));
 }
 
 async function cronTick(env) {
@@ -829,13 +870,15 @@ async function outdoorTemp(env, ctx) {
 
 async function buildModel(env, snap, ctx) {
   // Independent reads run in parallel: sequential cold KV reads were what made /status slow.
-  const [grossRaw, ti, estPrev, trimCarRaw, trimLearnedRaw] = await Promise.all([
+  const [grossRaw, ti, estPrev, trimCarRaw, trimLearnedRaw, recentDrive] = await Promise.all([
     kvTextCached(env, "sc_capacity", 300),
     outdoorTempInfo(env, ctx),
     kvJsonCached(env, "cons_estimate"),
     kvTextCached(env, "consumption_trim"),
     kvTextCached(env, "consumption_trim_learned"),
+    env.STATE.get("recent_drive", "json"),
   ]);
+  const warm = !!(recentDrive && Date.now() - recentDrive.at < 45 * 60 * 1000);
   const net = Math.round((Number(grossRaw) || 82) * 0.94);
   const model = { capacityKwhNet: net, referenceTempC: REF_TEMP_C };
   const t = ti.t;
@@ -863,7 +906,7 @@ async function buildModel(env, snap, ctx) {
   }
   // Real driving beats the car's estimate once we have >= 40 km in this temperature band.
   const [lc, bySpeed, cc] = await Promise.all([
-    learnedConsumption(env, t), learnedSpeedConsumption(env, t), learnedChargeCurve(env, t),
+    learnedConsumption(env, t), learnedSpeedConsumption(env, t), learnedChargeCurve(env, t, warm),
   ]);
   if (lc) { model.consumptionKwhPer100 = lc.value; model.consumptionSource = "learned"; model.learnedKm = lc.km; }
   // Calibration against Maps' own predictions (see /trim). Maps follows the numbers it is
@@ -875,7 +918,8 @@ async function buildModel(env, snap, ctx) {
     model.consumptionKwhPer100 = Math.round(model.consumptionKwhPer100 * trim * 10) / 10;
   }
   if (Object.keys(bySpeed).length) model.consumptionBySpeed = bySpeed;
-  if (cc) { model.chargeCurveKw = cc.curveKw; model.chargeSessions = cc.sessions; }
+  if (cc) { model.chargeCurveKw = cc.curveKw; model.chargeSessions = cc.sessions; model.chargeCurveWarm = !!cc.warm; }
+  model.batteryWarm = warm;
   return model;
 }
 
