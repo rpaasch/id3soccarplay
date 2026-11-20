@@ -799,7 +799,10 @@ async function cronTick(env) {
 // estimate and the fixed safety margin. Energy-weighted (sum/sum) so short, coarse trips
 // (SoC reports whole percent = 0.77 kWh) cannot dominate.
 
-const TRIP_END_IDLE_MS = 10 * 60 * 1000;
+// VW reports the odometer only about every 20 min while driving (SoC every 2-3 min), so a trip
+// ends after 30 min without odometer movement AND without SoC falling (or when charging starts).
+const TRIP_END_IDLE_MS = 30 * 60 * 1000;
+const WINDOW_MAX_MS = 45 * 60 * 1000; // odometer windows up to this long are still classified by speed
 const TRIP_MIN_KM = 5;
 const r1 = (x) => Math.round(x * 10) / 10;
 
@@ -826,38 +829,44 @@ async function trackTrip(env, snap, prevEntry, tempC) {
     if (snap.charging === true || !prevEntry || typeof prevEntry.odo !== "number" || now.odo - prevEntry.odo < 0.5) return;
     const lastEnd = await env.STATE.get("trip_last_end", "json");
     const start = { t: prevEntry.t, soc: prevEntry.soc, odo: prevEntry.odo };
-    trip = { start, last: start, lastMoveT: start.t, lastDriving: start, binKm: Array(10).fill(0), unbinnedKm: 0,
+    trip = { start, last: start, lastMoveT: start.t, lastOdoT: start.t, lastDriving: start, binKm: Array(10).fill(0), unbinnedKm: 0,
       driveMs: 0, tempSum: 0, tempN: 0, parkedH: lastEnd ? r1((start.t - lastEnd.t) / 3600000) : null };
   }
   // Same timestamp but a newer odometer (two reports of one moment) still counts as movement.
   if (now.t < trip.last.t || (now.t === trip.last.t && now.odo <= trip.last.odo)) return;
   const dKm = now.odo - trip.last.odo, dt = now.t - trip.last.t;
   if (snap.charging === true) return finishTrip(env, trip, trip.lastDriving); // charging ends the trip
-  if (dKm <= 0 && now.t - trip.lastMoveT >= TRIP_END_IDLE_MS) return finishTrip(env, trip, now); // parked
+  if (dKm > 0 || now.soc < trip.last.soc - 0.005) trip.lastMoveT = now.t; // odometer or SoC still moving
+  if (dKm <= 0 && now.t - trip.lastMoveT >= TRIP_END_IDLE_MS) return finishTrip(env, trip, trip.lastDriving); // parked
   if (dKm > 0) {
-    if (dt <= 15 * 60 * 1000) {
+    // Speed = km since the previous odometer CHANGE / time since then (SoC reports in between
+    // carry the same odometer value and must not shrink the window).
+    const odoMs = now.t - (trip.lastOdoT ?? trip.last.t);
+    trip.lastOdoT = now.t;
+    if (odoMs <= WINDOW_MAX_MS) {
       // The odometer reports whole km: a 2-min window at 110 km/h reads 3 or 4 km (90 or 120 km/h),
       // which overstates air drag. Pool windows until >= 5 km or >= 8 min before classifying.
       trip.pend = trip.pend || { km: 0, ms: 0 };
-      trip.pend.km += dKm; trip.pend.ms += dt;
-      if (trip.pend.km >= 5 || trip.pend.ms >= 8 * 60 * 1000) flushPend(trip);
+      trip.pend.km += dKm; trip.pend.ms += odoMs;
+      if ((trip.pend.km >= 5 && trip.pend.ms >= 2 * 60 * 1000) || trip.pend.ms >= 8 * 60 * 1000) flushPend(trip);
     } else trip.unbinnedKm += dKm; // a long gap: speed unknown, spread later like the rest of the trip
-    trip.lastMoveT = now.t;
     if (typeof tempC === "number") { trip.tempSum += tempC; trip.tempN++; }
   }
-  if (dt <= 15 * 60 * 1000) trip.driveMs += dt; // includes stops at lights: heating runs then too
+  if (dt <= WINDOW_MAX_MS) trip.driveMs += dt; // includes stops at lights: heating runs then too
   trip.last = now;
-  trip.lastDriving = now;
+  if (trip.lastMoveT === now.t) trip.lastDriving = now; // the trip's end = last moment anything moved
   await kvPut(env, "trip_current", JSON.stringify(trip));
 }
 
-function flushPend(trip) {
-  if (trip.pend && trip.pend.km > 0 && trip.pend.ms > 0) trip.binKm[speedBin(trip.pend.km / (trip.pend.ms / 3600000))] += trip.pend.km;
+function flushPend(trip, final) {
+  if (!trip.pend || !(trip.pend.km > 0)) return;
+  if (!(trip.pend.ms > 0)) { if (final) { trip.unbinnedKm += trip.pend.km; trip.pend = { km: 0, ms: 0 }; } return; } // no time yet: wait
+  trip.binKm[speedBin(trip.pend.km / (trip.pend.ms / 3600000))] += trip.pend.km;
   trip.pend = { km: 0, ms: 0 };
 }
 
 async function finishTrip(env, trip, end) {
-  flushPend(trip);
+  flushPend(trip, true);
   try { await env.STATE.delete("trip_current"); } catch { /* best effort */ }
   await kvPut(env, "trip_last_end", JSON.stringify({ t: end.t }));
   const km = end.odo - trip.start.odo;
@@ -865,14 +874,13 @@ async function finishTrip(env, trip, end) {
   if (km < TRIP_MIN_KM || dSoc < 0) return;
   const binKm = trip.binKm.slice();
   const binned = binKm.reduce((a, b) => a + b, 0);
-  let hours = trip.driveMs / 3600000;
+  // Time on the road = start .. last movement (heating runs the whole time, also at lights).
+  let hours = (end.t - trip.start.t) / 3600000;
   if (trip.unbinnedKm > 0) {
-    if (binned > 0) {
-      for (let i = 0; i < 10; i++) binKm[i] += (trip.unbinnedKm * binKm[i]) / binned;
-      hours += hours > 0 ? (trip.unbinnedKm * hours) / binned : trip.unbinnedKm / 60;
-    } else { binKm[4] += trip.unbinnedKm; hours += trip.unbinnedKm / 80; }
+    if (binned > 0) for (let i = 0; i < 10; i++) binKm[i] += (trip.unbinnedKm * binKm[i]) / binned;
+    else binKm[speedBin(hours > 0 ? km / hours : 60)] += trip.unbinnedKm;
   }
-  if (!(hours > 0)) hours = km / 70;
+  if (!(hours > 0.05)) hours = km / 60;
   const tempC = trip.tempN ? trip.tempSum / trip.tempN : null;
   const kwh = dSoc * (await netCapacityKwh(env));
   const predicted = predictTripKwh(binKm, hours, tempC);
