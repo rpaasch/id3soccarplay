@@ -22,6 +22,14 @@
 	<string>public.app-category.navigation</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Måler fart og højde under kørsel, så forbrugsmodellen til Apple Maps passer til din kørsel. Positioner forlader aldrig telefonen.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Måler fart og højde under kørsel, også når appen ikke er åben, så forbrugsmodellen til Apple Maps passer til din kørsel. Kun fart- og højdeopsummeringer sendes; positioner forlader aldrig telefonen.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+	</array>
 	<key>NSSiriUsageDescription</key>
 	<string>Deler bilens batteriniveau med Apple Maps til ladeplanlægning.</string>
 	<key>INIntentsSupported</key>

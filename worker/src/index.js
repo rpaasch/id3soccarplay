@@ -38,6 +38,7 @@ export default {
       if (p === "/trim") return trimEndpoint(request, env);
       if (p === "/shape") return shapeEndpoint(request, env);
       if (p === "/trips") return tripsEndpoint(request, env);
+      if (p === "/gps") return gpsEndpoint(request, env);
       if (p === "/health") return new Response("ok", { status: 200 });
       return new Response("Not found", { status: 404 });
     } catch (e) {
@@ -881,9 +882,75 @@ async function finishTrip(env, trip, end) {
     predictedKwh: r1(predicted), predictedPer100: r1((predicted / km) * 100), ratio: Math.round((kwh / predicted) * 100) / 100,
     cold: trip.parkedH != null && trip.parkedH >= 3, parkedH: trip.parkedH,
   };
+  applyGps(rec, await env.STATE.get("gps_segments", "json"));
   const trips = (await env.STATE.get("trips", "json")) || [];
   trips.push(rec);
   await kvPut(env, "trips", JSON.stringify(trips.slice(-100)));
+}
+
+// ---------- iPhone GPS aggregates (no positions: seconds/km per speed bin, metres up/down) ----------
+const ALT_GAIN_WH_PER_M = 7.5;  // id3.json vehicle_altitude_gain_consumption_wh_per_m (what Maps uses)
+const ALT_LOSS_WH_PER_M = 5.5;  // ... _loss_ (recovered)
+
+function gpsFor(trip, segs) {
+  const lo = trip.start - 10 * 60 * 1000, hi = trip.end + 10 * 60 * 1000;
+  const hit = (segs || []).filter((g) => g.end >= lo && g.start <= hi);
+  if (!hit.length) return null;
+  const g = { binSec: Array(10).fill(0), binKm: Array(10).fill(0), gainM: 0, lossM: 0 };
+  for (const x of hit) {
+    for (let i = 0; i < 10; i++) { g.binSec[i] += x.binSec[i] || 0; g.binKm[i] += x.binKm[i] || 0; }
+    g.gainM += x.gainM || 0; g.lossM += x.lossM || 0;
+  }
+  g.km = g.binKm.reduce((a, b) => a + b, 0);
+  return g.km >= 0.7 * trip.km ? g : null; // GPS must cover most of the trip
+}
+
+// Re-predict a trip from the GPS speed profile + elevation (mutates `rec`). True when applied.
+function applyGps(rec, segs) {
+  if (rec.source === "gps") return false;
+  const g = gpsFor(rec, segs);
+  if (!g) return false;
+  const scale = rec.km / g.km; // the odometer is the distance truth; GPS gives the shape
+  const binKm = g.binKm.map((k) => k * scale);
+  const hours = g.binSec.reduce((a, b) => a + b, 0) / 3600;
+  const p = physicsParts(rec.tempC);
+  const elevKwh = (g.gainM * ALT_GAIN_WH_PER_M - g.lossM * ALT_LOSS_WH_PER_M) / 1000;
+  const predicted = binKm.reduce((a, km, i) => a + (km * p.trac[i] * p.kt) / 100, 0) + p.auxKw * hours + elevKwh;
+  if (!(predicted > 0)) return false;
+  Object.assign(rec, {
+    source: "gps", binKm: binKm.map(r1), gainM: Math.round(g.gainM), lossM: Math.round(g.lossM),
+    avgKmh: Math.round(rec.km / hours),
+    predictedKwh: r1(predicted), predictedPer100: r1((predicted / rec.km) * 100),
+    ratio: Math.round((rec.kwh / predicted) * 100) / 100,
+  });
+  return true;
+}
+
+async function gpsEndpoint(request, env) {
+  const url = new URL(request.url);
+  const token = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || url.searchParams.get("token");
+  if (!env.STATUS_TOKEN || token !== env.STATUS_TOKEN) return new Response("unauthorized", { status: 401 });
+  const segs = (await env.STATE.get("gps_segments", "json")) || [];
+  if (request.method === "POST") {
+    let body;
+    try { body = await request.json(); } catch { return new Response("bad json", { status: 400 }); }
+    const num = (x) => (typeof x === "number" && isFinite(x) ? x : 0);
+    for (const x of (body.segments || []).slice(0, 50)) {
+      if (!Array.isArray(x.binSec) || !Array.isArray(x.binKm) || x.binSec.length !== 10 || x.binKm.length !== 10) continue;
+      const seg = { start: num(x.start), end: num(x.end), binSec: x.binSec.map(num), binKm: x.binKm.map(num), gainM: num(x.gainM), lossM: num(x.lossM) };
+      if (!(seg.end > seg.start) || segs.some((y) => y.start === seg.start)) continue;
+      segs.push(seg);
+    }
+    segs.sort((a, b) => a.start - b.start);
+    await kvPut(env, "gps_segments", JSON.stringify(segs.slice(-200)));
+    // Trips that already ended get their prediction redone from GPS.
+    const trips = (await env.STATE.get("trips", "json")) || [];
+    let changed = 0;
+    for (const t of trips.slice(-20)) if (applyGps(t, segs)) changed++;
+    if (changed) await kvPut(env, "trips", JSON.stringify(trips));
+    return new Response(JSON.stringify({ ok: true, stored: segs.length, tripsUpdated: changed }), { headers: { "content-type": "application/json" } });
+  }
+  return new Response(JSON.stringify({ segments: segs.slice(-20) }), { headers: { "content-type": "application/json" } });
 }
 
 // actual/predicted for trips near this temperature (+-4 C), else over all trips; >= 40 km needed.

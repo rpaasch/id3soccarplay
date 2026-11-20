@@ -12,6 +12,8 @@ import SwiftUI
 struct ID3MapsApp: App {
     init() {
         SharedLog.shared.log("App launched (build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))", category: "app")
+        // Also runs when iOS relaunches the app in the background for a significant location change.
+        GPSRecorder.shared.start()
     }
 
     var body: some Scene {

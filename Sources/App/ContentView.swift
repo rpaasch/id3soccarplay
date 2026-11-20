@@ -25,6 +25,8 @@ struct ContentView: View {
     @State private var siriStatus = "unknown"
     @State private var trips: [Trip] = []
     @State private var tripsNote = ""
+    @State private var gpsOn = GPSRecorder.shared.enabled
+    @State private var gpsNote = ""
 
     var body: some View {
         NavigationStack {
@@ -32,6 +34,7 @@ struct ContentView: View {
                 statusSection
                 chargeCurveSection
                 tripsSection
+                gpsSection
                 connectionSection
                 actionSection
                 logSection
@@ -158,6 +161,27 @@ struct ContentView: View {
         }
     }
 
+    private var gpsSection: some View {
+        Section("GPS-måling af kørsel") {
+            Toggle("Mål fart og højde med GPS", isOn: $gpsOn)
+                .onChange(of: gpsOn) { _, on in
+                    GPSRecorder.shared.enabled = on
+                    refreshGPSNote()
+                }
+            if gpsOn {
+                row("Tilladelse", GPSRecorder.shared.authorizationText)
+                row("Optager nu", GPSRecorder.shared.isRecording ? "ja" : "nej")
+                if !gpsNote.isEmpty { Text(gpsNote).font(.footnote).foregroundStyle(.secondary) }
+            }
+            Text("Positioner bliver på telefonen. Kun tid og km pr. fartinterval samt meter op og ned sendes til Workeren. Vælg \"Altid\" som placeringstilladelse, så turen måles uden at appen er åben.")
+                .font(.footnote).foregroundStyle(.secondary)
+        }
+    }
+
+    private func refreshGPSNote() {
+        gpsNote = GPSRecorder.shared.lastUploadNote
+    }
+
     private var connectionSection: some View {
         Section("Forbindelse til Workeren") {
             if hasToken {
@@ -238,6 +262,8 @@ struct ContentView: View {
             live = s
             liveNote = "Hentet fra Workeren."
             if let r = try? await TripsClient.fetch() { trips = r.trips; tripsNote = "" } else { tripsNote = "Kunne ikke hente turene." }
+            await GPSRecorder.shared.flushQueue()
+            refreshGPSNote()
             if Date().timeIntervalSince(s.measuredAt) > 1800 && !s.isCharging {
                 liveNote += " Tidspunktet er, hvornår bilen sidst meldte til VW. Det er normalt, når den holder parkeret."
             }
