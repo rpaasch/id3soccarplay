@@ -37,6 +37,7 @@ export default {
       if (p === "/learn") return learnEndpoint(request, env);
       if (p === "/trim") return trimEndpoint(request, env);
       if (p === "/shape") return shapeEndpoint(request, env);
+      if (p === "/trips") return tripsEndpoint(request, env);
       if (p === "/health") return new Response("ok", { status: 200 });
       return new Response("Not found", { status: 404 });
     } catch (e) {
@@ -553,6 +554,7 @@ async function learn(env, snap) {
       const rd = await env.STATE.get("recent_drive", "json");
       if (!rd || snap.measuredAt - rd.at > 5 * 60 * 1000) await kvPut(env, "recent_drive", JSON.stringify({ at: snap.measuredAt }));
     }
+    await trackTrip(env, snap, prevEntry, t);
     await learnConsumption(env, snap, t);
     await learnCharging(env, snap, t, log);
   } catch (e) {
@@ -787,6 +789,131 @@ async function cronTick(env) {
   await pollSafely(env);
 }
 
+// ---------- Trip log + calibration ----------
+//
+// Every drive becomes a trip record: km, SoC used, average outdoor temperature, km per Maps
+// speed bin (from ~2-min odometer windows), time driven, and whether it was a cold start. For
+// each trip the PURE physics model (same bins + heating power Maps gets) predicts the energy;
+// actual / predicted per temperature is the calibration that replaces both the car's own
+// estimate and the fixed safety margin. Energy-weighted (sum/sum) so short, coarse trips
+// (SoC reports whole percent = 0.77 kWh) cannot dominate.
+
+const TRIP_END_IDLE_MS = 10 * 60 * 1000;
+const TRIP_MIN_KM = 5;
+const r1 = (x) => Math.round(x * 10) / 10;
+
+function physicsParts(tempC) {
+  const T = typeof tempC === "number" ? tempC : 8;
+  return {
+    trac: BIN_KMH.map(physicsKwhPer100),
+    kt: Math.min(1.3, Math.max(1, 1 + 0.012 * (15 - T))),
+    auxKw: Math.min(3, Math.max(0.4, 0.4 + 0.08 * (15 - T))),
+  };
+}
+const speedBin = (kmh) => Math.max(0, Math.min(9, Math.floor(kmh / 20)));
+
+function predictTripKwh(binKm, hours, tempC) {
+  const p = physicsParts(tempC);
+  return binKm.reduce((a, km, i) => a + (km * p.trac[i] * p.kt) / 100, 0) + p.auxKw * hours;
+}
+
+async function trackTrip(env, snap, prevEntry, tempC) {
+  if (typeof snap.odometerKm !== "number") return;
+  let trip = await env.STATE.get("trip_current", "json");
+  const now = { t: snap.measuredAt, soc: snap.soc, odo: snap.odometerKm };
+  if (!trip) {
+    if (snap.charging === true || !prevEntry || typeof prevEntry.odo !== "number" || now.odo - prevEntry.odo < 0.5) return;
+    const lastEnd = await env.STATE.get("trip_last_end", "json");
+    const start = { t: prevEntry.t, soc: prevEntry.soc, odo: prevEntry.odo };
+    trip = { start, last: start, lastMoveT: start.t, lastDriving: start, binKm: Array(10).fill(0), unbinnedKm: 0,
+      driveMs: 0, tempSum: 0, tempN: 0, parkedH: lastEnd ? r1((start.t - lastEnd.t) / 3600000) : null };
+  }
+  if (now.t <= trip.last.t) return;
+  const dKm = now.odo - trip.last.odo, dt = now.t - trip.last.t;
+  if (snap.charging === true) return finishTrip(env, trip, trip.lastDriving); // charging ends the trip
+  if (dKm <= 0 && now.t - trip.lastMoveT >= TRIP_END_IDLE_MS) return finishTrip(env, trip, now); // parked
+  if (dKm > 0) {
+    if (dt <= 15 * 60 * 1000) {
+      // The odometer reports whole km: a 2-min window at 110 km/h reads 3 or 4 km (90 or 120 km/h),
+      // which overstates air drag. Pool windows until >= 5 km or >= 8 min before classifying.
+      trip.pend = trip.pend || { km: 0, ms: 0 };
+      trip.pend.km += dKm; trip.pend.ms += dt;
+      if (trip.pend.km >= 5 || trip.pend.ms >= 8 * 60 * 1000) flushPend(trip);
+    } else trip.unbinnedKm += dKm; // a long gap: speed unknown, spread later like the rest of the trip
+    trip.lastMoveT = now.t;
+    if (typeof tempC === "number") { trip.tempSum += tempC; trip.tempN++; }
+  }
+  if (dt <= 15 * 60 * 1000) trip.driveMs += dt; // includes stops at lights: heating runs then too
+  trip.last = now;
+  trip.lastDriving = now;
+  await kvPut(env, "trip_current", JSON.stringify(trip));
+}
+
+function flushPend(trip) {
+  if (trip.pend && trip.pend.km > 0 && trip.pend.ms > 0) trip.binKm[speedBin(trip.pend.km / (trip.pend.ms / 3600000))] += trip.pend.km;
+  trip.pend = { km: 0, ms: 0 };
+}
+
+async function finishTrip(env, trip, end) {
+  flushPend(trip);
+  try { await env.STATE.delete("trip_current"); } catch { /* best effort */ }
+  await kvPut(env, "trip_last_end", JSON.stringify({ t: end.t }));
+  const km = end.odo - trip.start.odo;
+  const dSoc = trip.start.soc - end.soc;
+  if (km < TRIP_MIN_KM || dSoc < 0) return;
+  const binKm = trip.binKm.slice();
+  const binned = binKm.reduce((a, b) => a + b, 0);
+  let hours = trip.driveMs / 3600000;
+  if (trip.unbinnedKm > 0) {
+    if (binned > 0) {
+      for (let i = 0; i < 10; i++) binKm[i] += (trip.unbinnedKm * binKm[i]) / binned;
+      hours += hours > 0 ? (trip.unbinnedKm * hours) / binned : trip.unbinnedKm / 60;
+    } else { binKm[4] += trip.unbinnedKm; hours += trip.unbinnedKm / 80; }
+  }
+  if (!(hours > 0)) hours = km / 70;
+  const tempC = trip.tempN ? trip.tempSum / trip.tempN : null;
+  const kwh = dSoc * (await netCapacityKwh(env));
+  const predicted = predictTripKwh(binKm, hours, tempC);
+  const rec = {
+    start: trip.start.t, end: end.t, km: r1(km), socFrom: trip.start.soc, socTo: end.soc,
+    kwh: r1(kwh), kwhPer100: r1((kwh / km) * 100), tempC: tempC == null ? null : r1(tempC),
+    avgKmh: Math.round(km / hours), binKm: binKm.map(r1),
+    predictedKwh: r1(predicted), predictedPer100: r1((predicted / km) * 100), ratio: Math.round((kwh / predicted) * 100) / 100,
+    cold: trip.parkedH != null && trip.parkedH >= 3, parkedH: trip.parkedH,
+  };
+  const trips = (await env.STATE.get("trips", "json")) || [];
+  trips.push(rec);
+  await kvPut(env, "trips", JSON.stringify(trips.slice(-100)));
+}
+
+// actual/predicted for trips near this temperature (+-4 C), else over all trips; >= 40 km needed.
+function tripCalibration(trips, tempC) {
+  const ok = (trips || []).filter((x) => x.km >= 10 && x.predictedKwh > 0 && x.ratio > 0.5 && x.ratio < 2.5);
+  const pick = (arr) => {
+    const a = arr.slice(-10);
+    const km = a.reduce((s, x) => s + x.km, 0);
+    if (km < 40) return null;
+    const f = a.reduce((s, x) => s + x.kwh, 0) / a.reduce((s, x) => s + x.predictedKwh, 0);
+    return { factor: Math.round(f * 100) / 100, km: Math.round(km), n: a.length };
+  };
+  const near = typeof tempC === "number" ? pick(ok.filter((x) => typeof x.tempC === "number" && Math.abs(x.tempC - tempC) <= 4)) : null;
+  if (near) return { ...near, scope: "temperature" };
+  const all = pick(ok);
+  return all ? { ...all, scope: "all" } : null;
+}
+
+async function tripsEndpoint(request, env) {
+  const url = new URL(request.url);
+  const token = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || url.searchParams.get("token");
+  if (!env.STATUS_TOKEN || token !== env.STATUS_TOKEN) return new Response("unauthorized", { status: 401 });
+  const trips = (await env.STATE.get("trips", "json")) || [];
+  const t = (await outdoorTempInfo(env, null)).t;
+  return new Response(JSON.stringify({
+    trips: trips.slice(-50).reverse(), current: await env.STATE.get("trip_current", "json"),
+    calibration: tripCalibration(trips, t), temperatureC: t,
+  }), { headers: { "content-type": "application/json" } });
+}
+
 // ---------- Consumption shape over Maps' 10 consumption values ----------
 // Hypothesis (being tested): the 10 values are speed bins, slow -> fast. Assumed mapping:
 // 0-3 city, 4-6 country road, 7-9 motorway. The app multiplies the baseline vector by the
@@ -969,7 +1096,7 @@ async function outdoorTemp(env, ctx) {
 
 async function buildModel(env, snap, ctx) {
   // Independent reads run in parallel: sequential cold KV reads were what made /status slow.
-  const [grossRaw, ti, estPrev, trimCarRaw, trimLearnedRaw, recentDrive, shapeMode] = await Promise.all([
+  const [grossRaw, ti, estPrev, trimCarRaw, trimLearnedRaw, recentDrive, shapeMode, trips] = await Promise.all([
     kvTextCached(env, "sc_capacity", 300),
     outdoorTempInfo(env, ctx),
     kvJsonCached(env, "cons_estimate"),
@@ -977,6 +1104,7 @@ async function buildModel(env, snap, ctx) {
     kvTextCached(env, "consumption_trim_learned"),
     env.STATE.get("recent_drive", "json"),
     env.STATE.get("consumption_shape_mode"),
+    kvJsonCached(env, "trips"),
   ]);
   const warm = !!(recentDrive && Date.now() - recentDrive.at < 45 * 60 * 1000);
   const net = Math.round((Number(grossRaw) || 82) * 0.94);
@@ -1019,7 +1147,20 @@ async function buildModel(env, snap, ctx) {
   }
   if (Object.keys(bySpeed).length) model.consumptionBySpeed = bySpeed;
   const mode = shapeMode || "physics"; // default since the bin meaning was confirmed
-  if (mode === "physics" && model.consumptionKwhPer100) {
+  const cal = mode === "physics" ? tripCalibration(trips, t) : null;
+  if (cal) {
+    // Calibrated by your own trips: physics x (actual/predicted). Replaces car estimate + margin.
+    const p = physicsParts(t);
+    const f = cal.factor * (Number(trimLearnedRaw) || 1.0);
+    model.consumptionBinsKwhPer100 = p.trac.map((x) => Math.round(Math.min(60, Math.max(4, x * p.kt * f)) * 10) / 10);
+    model.auxPowerW = Math.round(p.auxKw * f * 1000);
+    const sumMix = BIN_MIX.reduce((a, b) => a + b, 0);
+    model.consumptionKwhPer100 = r1(BIN_MIX.reduce((a, m, i) => a + m * (model.consumptionBinsKwhPer100[i] + (model.auxPowerW / 1000 / BIN_KMH[i]) * 100), 0) / sumMix);
+    model.consumptionSource = "trips";
+    model.consumptionTrim = Number(trimLearnedRaw) || 1.0;
+    model.tripCalibration = cal;
+    model.consumptionShapeMode = "trips";
+  } else if (mode === "physics" && model.consumptionKwhPer100) {
     const ph = physicsBins(model.consumptionKwhPer100, t);
     if (ph) { model.consumptionBinsKwhPer100 = ph.bins; model.auxPowerW = ph.auxW; model.consumptionShapeMode = "physics"; }
   } else {
