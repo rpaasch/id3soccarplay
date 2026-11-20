@@ -829,7 +829,8 @@ async function trackTrip(env, snap, prevEntry, tempC) {
     trip = { start, last: start, lastMoveT: start.t, lastDriving: start, binKm: Array(10).fill(0), unbinnedKm: 0,
       driveMs: 0, tempSum: 0, tempN: 0, parkedH: lastEnd ? r1((start.t - lastEnd.t) / 3600000) : null };
   }
-  if (now.t <= trip.last.t) return;
+  // Same timestamp but a newer odometer (two reports of one moment) still counts as movement.
+  if (now.t < trip.last.t || (now.t === trip.last.t && now.odo <= trip.last.odo)) return;
   const dKm = now.odo - trip.last.odo, dt = now.t - trip.last.t;
   if (snap.charging === true) return finishTrip(env, trip, trip.lastDriving); // charging ends the trip
   if (dKm <= 0 && now.t - trip.lastMoveT >= TRIP_END_IDLE_MS) return finishTrip(env, trip, now); // parked
