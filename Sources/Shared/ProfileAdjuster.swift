@@ -47,6 +47,16 @@ struct ModelHints: Sendable, Codable {
     var consumptionBinsKwhPer100: [Double]?
     /// Auxiliary power (heating etc.) in W that Maps adds per hour of driving; replaces id3.json's 500 W.
     var auxPowerW: Double?
+    /// When set, consumption is calibrated by your own trips (actual / physics prediction).
+    var tripCalibration: TripCalibrationHint?
+}
+
+/// Mirror of the Worker's trip calibration, available to the extension too.
+struct TripCalibrationHint: Codable, Sendable {
+    let factor: Double
+    let km: Double
+    let n: Int
+    let scope: String
 }
 
 extension JSONObject {

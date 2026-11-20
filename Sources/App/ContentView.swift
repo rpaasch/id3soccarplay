@@ -23,12 +23,15 @@ struct ContentView: View {
     @State private var exportURL: URL?
     @State private var showShare = false
     @State private var siriStatus = "unknown"
+    @State private var trips: [Trip] = []
+    @State private var tripsNote = ""
 
     var body: some View {
         NavigationStack {
             List {
                 statusSection
                 chargeCurveSection
+                tripsSection
                 connectionSection
                 actionSection
                 logSection
@@ -57,11 +60,23 @@ struct ContentView: View {
                 if let m = s.model {
                     if let c = m.capacityKwhNet { row("Batteri (netto)", "\(Int(c)) kWh") }
                     if let k = m.consumptionKwhPer100 {
-                        let label = m.consumptionSource == "learned" ? "Forbrug (lært)" : "Forbrug (bilens estimat)"
+                        let label = m.consumptionSource == "trips" ? "Forbrug (lært af ture)"
+                            : m.consumptionSource == "learned" ? "Forbrug (lært)" : "Forbrug (bilens estimat)"
                         row(label, String(format: "%.1f kWh/100 km", k))
                     }
                     if m.consumptionSource == "learned", let km = m.learnedKm { row("Lært over", "\(Int(km)) km") }
-                    if let mode = m.consumptionShapeMode { row("Forbrug efter fart", mode == "learned" ? "lært" : "test: \(mode)") }
+                    if let mode = m.consumptionShapeMode {
+                        let text: String = switch mode {
+                        case "trips": "fysikmodel, kalibreret af dine ture"
+                        case "physics": "fysikmodel (bilens estimat + margen)"
+                        case "learned": "lært"
+                        default: "test: \(mode)"
+                        }
+                        row("Forbrug efter fart", text)
+                    }
+                    if let c = m.tripCalibration {
+                        row("Kalibrering", String(format: "×%.2f (%d ture, %.0f km)", c.factor, c.n, c.km))
+                    }
                     if let t = m.temperatureC { row("Udetemperatur", String(format: "%.1f °C", t)) }
                     if let x = m.chargePowerScale {
                         row("Ladeeffekt", String(format: "×%.2f (×1,00 = kurven ved %.0f °C)", x, m.referenceTempC ?? 6))
@@ -109,6 +124,36 @@ struct ContentView: View {
                     Text("Grønne punkter er lært af dine egne hurtigladninger. Grå er skøn: den lærte kurve forlænget med grundkurvens form, eller grundkurven justeret efter udetemperaturen, hvis intet er lært.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
+            }
+        }
+    }
+
+    private var tripsSection: some View {
+        Section("Ture (forudsagt mod faktisk)") {
+            if trips.isEmpty {
+                Text(tripsNote.isEmpty ? "Ingen ture endnu. En tur logges, når bilen har kørt mindst 5 km og holdt stille i 10 min." : tripsNote)
+                    .font(.footnote).foregroundStyle(.secondary)
+            } else {
+                ForEach(trips.prefix(15)) { t in
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text(t.startDate.formatted(date: .abbreviated, time: .shortened))
+                            Spacer()
+                            Text(String(format: "%.0f km", t.km)).foregroundStyle(.secondary)
+                        }
+                        Text(String(format: "Faktisk %.1f · forudsagt %.1f kWh/100 km (×%.2f)", t.kwhPer100, t.predictedPer100, t.ratio))
+                            .font(.callout)
+                        Text([
+                            String(format: "%.0f → %.0f %%", t.socFrom * 100, t.socTo * 100),
+                            t.tempC.map { String(format: "%.1f °C", $0) },
+                            t.avgKmh.map { String(format: "snit %.0f km/t", $0) },
+                            t.cold == true ? "koldstart" : nil,
+                        ].compactMap { $0 }.joined(separator: " · "))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Text("×1,00 betyder, at bilen brugte præcis det, modellen (og dermed Maps) regnede med. Over 1 = mere end forudsagt.")
+                    .font(.footnote).foregroundStyle(.secondary)
             }
         }
     }
@@ -192,6 +237,7 @@ struct ContentView: View {
             SharedStore.setCodable(s, for: .lastState)
             live = s
             liveNote = "Hentet fra Workeren."
+            if let r = try? await TripsClient.fetch() { trips = r.trips; tripsNote = "" } else { tripsNote = "Kunne ikke hente turene." }
             if Date().timeIntervalSince(s.measuredAt) > 1800 && !s.isCharging {
                 liveNote += " Tidspunktet er, hvornår bilen sidst meldte til VW. Det er normalt, når den holder parkeret."
             }
