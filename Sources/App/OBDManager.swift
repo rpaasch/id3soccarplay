@@ -132,6 +132,8 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var extras: [String: String] = [:]
     private var tick = 0
     private var connectedAt = Date()
+    /// After a deliberate idle disconnect: do not reconnect before this, so the dongle can sleep.
+    private var idleBackoffUntil = Date.distantPast
     private var scanQueue: [String] = []
     private var scanTotal = 0
     private var scanHits = 0
@@ -234,7 +236,17 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         ready = false; writeChar = nil; notifyChar = nil; waiting = nil; pending = []
         state = "venter på donglen (tænd bilen)"
         log("OBD: disconnected")
-        if enabled { central.connect(p) } // re-arm the pending connection
+        guard enabled else { return }
+        let wait = idleBackoffUntil.timeIntervalSinceNow
+        if wait > 0 {
+            state = "bilen er slukket – donglen sover"
+            queue.asyncAfter(deadline: .now() + wait) { [weak self] in
+                guard let self, self.enabled, self.peripheral?.state != .connected else { return }
+                self.central?.connect(p) // re-arm: completes when the car (and dongle) wake up
+            }
+        } else {
+            central.connect(p) // re-arm the pending connection
+        }
     }
 
     // MARK: CBPeripheralDelegate
@@ -368,6 +380,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             // spare the 12 V battery. The pending reconnect wakes us when the car starts again.
             if let p = self.peripheral, Date().timeIntervalSince(self.lastAnswer ?? self.connectedAt) > 180 {
                 self.log("OBD: car silent for 3 min, disconnecting so the dongle can sleep")
+                self.idleBackoffUntil = Date().addingTimeInterval(15 * 60)
                 self.central?.cancelPeripheralConnection(p)
                 return
             }
