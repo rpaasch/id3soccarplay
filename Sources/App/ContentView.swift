@@ -77,6 +77,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity)
                     chips(for: s)
                 }
+                if s.isCharging { chargingNowCard(s) }
                 if let m = s.model {
                     consumptionCard(m)
                     temperatureCard(m)
@@ -104,6 +105,60 @@ struct ContentView: View {
         if obdOn, obd.validated { StatusChip(text: "OBD live", symbol: "antenna.radiowaves.left.and.right", tint: .green) }
         if gpsOn { StatusChip(text: GPSRecorder.shared.isRecording ? "GPS måler" : "GPS klar", symbol: "location.fill", tint: .blue) }
         StatusChip(text: warm ? "Varmt batteri" : "Koldt batteri", symbol: warm ? "thermometer.sun.fill" : "snowflake", tint: warm ? .orange : .cyan)
+    }
+
+    /// Live charging: power now, time to full, and this session's power per SoC over Maps' curve.
+    private func chargingNowCard(_ s: VehicleState) -> some View {
+        Card(title: "Ladning nu", symbol: "bolt.fill") {
+            HStack(spacing: 12) {
+                stat("Effekt", s.chargePowerW.map { String(format: "%.0f kW", $0 / 1000) } ?? "–")
+                stat("Til fuld", s.minutesToFull.map { "\($0) min" } ?? "–")
+                stat("Type", (s.chargeKind ?? "?").uppercased())
+            }
+            let samples = (s.chargeSamples ?? []).sorted { $0.soc < $1.soc }
+            let expected = profile.map { curvePoints(profile: $0, hints: s.model) } ?? []
+            if samples.count >= 2 || !expected.isEmpty {
+                Chart {
+                    ForEach(expected) { pt in
+                        LineMark(x: .value("Batteri", pt.soc), y: .value("kW", pt.kw), series: .value("Kurve", "Maps"))
+                            .foregroundStyle(.gray.opacity(0.6))
+                            .lineStyle(StrokeStyle(lineWidth: 2, dash: [4, 4]))
+                    }
+                    ForEach(Array(smoothed(samples).enumerated()), id: \.offset) { _, p in
+                        LineMark(x: .value("Batteri", p.0), y: .value("kW", p.1), series: .value("Kurve", "Nu"))
+                            .foregroundStyle(.green)
+                            .lineStyle(StrokeStyle(lineWidth: 3))
+                    }
+                    ForEach(samples, id: \.self) { x in
+                        PointMark(x: .value("Batteri", x.soc * 100), y: .value("kW", x.kw))
+                            .foregroundStyle(.green.opacity(0.35))
+                            .symbolSize(18)
+                    }
+                    if let now = s.chargePowerW {
+                        PointMark(x: .value("Batteri", s.stateOfCharge * 100), y: .value("kW", now / 1000))
+                            .foregroundStyle(.yellow)
+                            .symbolSize(120)
+                            .annotation(position: .top) { Text("nu").font(.caption2.bold()) }
+                    }
+                }
+                .chartXScale(domain: 0...100)
+                .chartXAxisLabel("Batteri (%)")
+                .chartYAxisLabel("kW")
+                .frame(height: 200)
+                Text("Grøn = denne ladning (målt). Stiplet grå = det Maps regner med.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// 3-point moving average (the SoC-derived samples are noisy at 1 % resolution).
+    private func smoothed(_ xs: [ChargeSample]) -> [(Double, Double)] {
+        guard xs.count >= 3 else { return xs.map { ($0.soc * 100, $0.kw) } }
+        return xs.indices.map { i in
+            let lo = max(0, i - 1), hi = min(xs.count - 1, i + 1)
+            let w = xs[lo...hi]
+            return (xs[i].soc * 100, w.map(\.kw).reduce(0, +) / Double(w.count))
+        }
     }
 
     private func consumptionCard(_ m: ModelHints) -> some View {

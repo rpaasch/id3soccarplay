@@ -26,6 +26,13 @@ private struct RemoteStatus: Decodable {
     let minutesToFull: Double?
     /// "ac" or "dc" while charging.
     let chargeKind: String?
+    /// Charging power in W (Smartcar), while charging.
+    let wattageW: Double?
+    let chargeSession: ChargeSessionDTO?
+}
+
+private struct ChargeSessionDTO: Decodable {
+    let samples: [ChargeSample]
 }
 
 enum StatusError: Error, CustomStringConvertible {
@@ -77,7 +84,9 @@ enum StatusClient {
             minutesToFull: (status.charging == true ? status.minutesToFull : nil)
                 .flatMap { $0 > 0 ? Int($0.rounded()) : nil },
             model: status.model,
-            chargeKind: status.charging == true ? status.chargeKind : nil
+            chargeKind: status.charging == true ? status.chargeKind : nil,
+            chargePowerW: status.charging == true ? status.wattageW : nil,
+            chargeSamples: status.charging == true ? status.chargeSession?.samples : nil
         )
     }
 }

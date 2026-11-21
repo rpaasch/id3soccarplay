@@ -1401,6 +1401,15 @@ async function statusEndpoint(request, env, ctx) {
   }
   const ageSec = Math.round((Date.now() - (snap.measuredAt || snap.receivedAt)) / 1000);
   const model = await buildModel(env, snap, ctx);
-  return new Response(JSON.stringify({ available: true, ageSeconds: ageSec, lastError, kvWriteError, model, ...snap }),
+  // While charging: this session's samples (SoC, kW) for the app's live charging chart.
+  let chargeSession = null;
+  if (snap.charging === true) {
+    const sess = await env.STATE.get("charge_session", "json");
+    if (sess) {
+      chargeSession = { startedAt: sess.startedAt, warm: !!sess.warm,
+        samples: (sess.samples || []).filter((x) => typeof x.kw === "number").slice(-120).map((x) => ({ t: x.t, soc: x.soc, kw: x.kw })) };
+    }
+  }
+  return new Response(JSON.stringify({ available: true, ageSeconds: ageSec, lastError, kvWriteError, model, chargeSession, ...snap }),
     { headers: { "content-type": "application/json" } });
 }

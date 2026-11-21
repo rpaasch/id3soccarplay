@@ -24,4 +24,17 @@ struct VehicleState: Sendable, Codable {
     var model: ModelHints?
     /// "ac" or "dc" while charging, if known.
     var chargeKind: String?
+    /// Charging power in W while charging (Smartcar's last value), if known.
+    var chargePowerW: Double? = nil
+    /// This charging session's measurements (for the live chart in the app).
+    var chargeSamples: [ChargeSample]? = nil
+}
+
+/// One measurement of the current charging session.
+struct ChargeSample: Codable, Sendable, Hashable {
+    /// ms since 1970
+    let t: Double
+    /// 0...1
+    let soc: Double
+    let kw: Double
 }
