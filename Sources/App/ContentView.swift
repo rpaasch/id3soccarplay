@@ -75,6 +75,7 @@ struct ContentView: View {
                         }
                         Spacer(minLength: 0)
                     }
+                    .padding(.bottom, 8)
                     chips(for: s)
                 }
                 if s.isCharging { chargingNowCard(s) }

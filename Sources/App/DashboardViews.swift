@@ -61,8 +61,9 @@ struct BatteryRing: View {
 
     var body: some View {
         ZStack {
-            Circle().stroke(color.opacity(0.18), lineWidth: 13)
-            Circle()
+            // Inset by half the line width so the stroke stays inside the frame.
+            Circle().inset(by: 6.5).stroke(color.opacity(0.18), lineWidth: 13)
+            Circle().inset(by: 6.5)
                 .trim(from: 0, to: max(0.01, min(1, soc)))
                 .stroke(color.gradient, style: StrokeStyle(lineWidth: 13, lineCap: .round))
                 .rotationEffect(.degrees(-90))
