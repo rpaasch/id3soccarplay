@@ -21,6 +21,13 @@
 import Foundation
 import CoreBluetooth
 
+/// A decoded value shown in the app.
+struct OBDDecoded: Sendable, Identifiable {
+    let label: String
+    let value: String
+    var id: String { label }
+}
+
 /// One raw battery value (identifier + payload hex) shown in the app until it is interpreted.
 struct OBDExtra: Sendable, Identifiable {
     let did: String
@@ -39,7 +46,8 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         var lastRaw: String?
         var lastSocPct: Double?
         var validated: Bool
-        var scale: Double?
+        var calibration: String?
+        var decoded: [OBDDecoded]
         // About the dongle
         var firmware: String?
         var volt12: String?
@@ -83,7 +91,6 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     private static let enabledKey = "obdEnabled"
     private static let deviceKey = "obdDeviceUUID"
-    private static let scaleKey = "obdScale"
     private static let restoreId = "id3maps.obd"
     /// GATT services used by Vgate / vLinker / generic BLE ELM327 dongles.
     private static var serviceUUIDs: [CBUUID] { [
@@ -96,10 +103,10 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private static let setup = ["ATZ", "ATE0", "ATL0", "ATS0", "ATH1", "ATSP7", "ATSH17FC007B", "ATCRA17FE007B", "ATST96"]
     private static let pollCommand = "22028C"
     /// Unverified MEB battery-controller identifiers polled now and then (raw shown in the app).
-    private static let extraDIDs = ["1E3B", "1E3D", "1E0E", "2A0B", "1E33", "1E34", "74CB", "74CC", "F45B", "0B32"]
+    /// Rotating extra reads: HV voltage, current, 16 temperature sensors, plus a few still unknown.
+    private static let extraDIDs = ["1E3B", "1E3D"] + tempDIDs + ["1E0E", "2A0B", "1E36", "1E38"]
     private static let pollMarker = "62028C"
     /// Candidate scalings of the single data byte (percent = byte / divisor).
-    private static let divisors: [Double] = [2.5, 2.55, 1.0, 2.0]
 
     /// Diagnostic candidates: (label, setup commands, request).
     private static let candidates: [(String, [String], String)] = [
@@ -128,6 +135,8 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var timer: DispatchSourceTimer?
     private var lastRaw: String?
     private var lastSocPct: Double?
+    private var bmsPct: Double?
+    private var lastResidual: Double?
     private var lastValidated = false
     private var diagnosticsPending = false
     private var diagRunning = false
@@ -151,7 +160,9 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     private func statusLocked() -> Status {
         Status(state: state, device: peripheral?.name, lastRaw: lastRaw, lastSocPct: lastSocPct,
-               validated: lastValidated, scale: UserDefaults.standard.object(forKey: Self.scaleKey) as? Double,
+               validated: lastValidated,
+               calibration: { let c = calibration(); return String(format: "vist = %.3f × BMS %+.2f (%d sammenligninger)", c.slope, c.intercept, c.pairs) }(),
+               decoded: decodedLocked.map { OBDDecoded(label: $0.0, value: $0.1) },
                firmware: firmware, volt12: volt12, lastAnswer: lastAnswer, okCount: okCount, failCount: failCount,
                extras: Self.extraDIDs.compactMap { d in extras[d].map { OBDExtra(did: d, hex: $0) } }, scanProgress: scanProgress)
     }
@@ -426,7 +437,53 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         sendNextLocked()
     }
 
-    // MARK: Parsing + validation
+    // MARK: Parsing + calibration
+
+    /// Battery-controller SoC (0x028C, byte / 2.5 = % of the WHOLE pack) -> the SoC the car shows.
+    /// VW keeps a hidden buffer, so the display is roughly (BMS - 5) / 0.9 (MEB). That prior is
+    /// refined from pairs with the Smartcar SoC (the car's displayed value): offset from any pair,
+    /// slope too once the pairs span >= 15 percentage points.
+    private static let calKey = "obdCalibration"
+    private static let pairsKey = "obdPairs"
+
+    private struct Calibration: Codable { var slope: Double; var intercept: Double; var pairs: Int }
+
+    private func calibration() -> Calibration {
+        if let d = UserDefaults.standard.data(forKey: Self.calKey), let c = try? JSONDecoder().decode(Calibration.self, from: d) { return c }
+        return Calibration(slope: 1 / 0.9, intercept: -5 / 0.9, pairs: 0)
+    }
+
+    /// Learns from a fresh Smartcar value (< 2 min old, not yet used). Returns the latest residual.
+    private func learnPair(bms: Double) -> Double? {
+        guard let cloud: VehicleState = SharedStore.codable(.lastState),
+              Date().timeIntervalSince(cloud.measuredAt) < 120 else { return nil }
+        var pairs = (UserDefaults.standard.array(forKey: Self.pairsKey) as? [[Double]]) ?? []
+        let t = cloud.measuredAt.timeIntervalSince1970
+        if pairs.last?[2] != t {
+            pairs.append([bms, cloud.stateOfCharge * 100, t])
+            pairs = Array(pairs.suffix(40))
+            UserDefaults.standard.set(pairs, forKey: Self.pairsKey)
+            var cal = calibration()
+            let ys = pairs.map { $0[1] }
+            if pairs.count >= 6, (ys.max() ?? 0) - (ys.min() ?? 0) >= 15 {
+                let xs = pairs.map { $0[0] }, n = Double(pairs.count)
+                let mx = xs.reduce(0, +) / n, my = ys.reduce(0, +) / n
+                let sxx = xs.reduce(0) { $0 + ($1 - mx) * ($1 - mx) }
+                let sxy = zip(xs, ys).reduce(0) { $0 + ($1.0 - mx) * ($1.1 - my) }
+                if sxx > 0 { cal.slope = min(1.3, max(0.9, sxy / sxx)); cal.intercept = my - cal.slope * mx }
+            } else {
+                // Keep the slope, fit the offset (median residual: whole-percent rounding is noisy).
+                let offs = pairs.map { $0[1] - cal.slope * $0[0] }.sorted()
+                cal.intercept = offs[offs.count / 2]
+            }
+            cal.pairs = pairs.count
+            UserDefaults.standard.set(try? JSONEncoder().encode(cal), forKey: Self.calKey)
+            log(String(format: "OBD: calibration pair BMS %.1f %% = car %.0f %% -> display = %.3f x BMS %+.2f (%d pairs)",
+                       bms, cloud.stateOfCharge * 100, cal.slope, cal.intercept, cal.pairs))
+        }
+        let cal = calibration()
+        return cloud.stateOfCharge * 100 - (cal.slope * bms + cal.intercept)
+    }
 
     private func handlePoll(_ reply: String) {
         let compact = reply.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "\r", with: "")
@@ -440,39 +497,50 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         guard hex.count == 2, let byte = UInt8(hex, radix: 16) else { failCount += 1; return }
         okCount += 1
         lastAnswer = Date()
-        let scale = chooseScale(byte: Double(byte))
-        guard let scale else {
-            state = String(format: "læser rå værdi %d (afventer sammenligning med Smartcar)", byte)
-            lastSocPct = nil; lastValidated = false
-            return
-        }
-        let pct = min(100, max(0, Double(byte) / scale))
+        let bms = Double(byte) / 2.5
+        bmsPct = bms
+        if let residual = learnPair(bms: bms) { lastResidual = residual }
+        let cal = calibration()
+        let pct = min(100, max(0, cal.slope * bms + cal.intercept))
         lastSocPct = pct
-        lastValidated = true
-        state = String(format: "live: %.1f %%", pct)
-        let reading = OBDReading(soc: pct / 100, at: Date(), validated: true)
+        // Only for Maps once at least one real comparison exists and it agrees within 2 pp.
+        lastValidated = cal.pairs > 0 && abs(lastResidual ?? 99) <= 2
+        state = String(format: "live: %.1f %%", pct) + (lastValidated ? "" : " (afventer sammenligning med Smartcar)")
+        let reading = OBDReading(soc: pct / 100, at: Date(), validated: lastValidated)
         // Keychain write at most every 10 s, or immediately on a whole-percent change.
-        let changed = (SharedStore.codable(.obdReading) as OBDReading?).map { Int($0.soc * 100) != Int(pct) } ?? true
+        let changed = (SharedStore.codable(.obdReading) as OBDReading?).map { Int($0.soc * 100) != Int(pct) || $0.validated != lastValidated } ?? true
         if changed || Date().timeIntervalSince(lastKeychainWrite) >= 10 {
             SharedStore.setCodable(reading, for: .obdReading)
             lastKeychainWrite = Date()
         }
     }
 
-    /// The divisor that turns the raw byte into the SoC Smartcar reported (within 4 pp), checked
-    /// only against a Smartcar value less than 20 minutes old. Once found it is remembered.
-    private func chooseScale(byte: Double) -> Double? {
-        if let known = UserDefaults.standard.object(forKey: Self.scaleKey) as? Double { return known }
-        guard let cloud: VehicleState = SharedStore.codable(.lastState),
-              Date().timeIntervalSince(cloud.measuredAt) < 20 * 60 else { return nil }
-        let target = cloud.stateOfCharge * 100
-        let best = Self.divisors.min { abs(byte / $0 - target) < abs(byte / $1 - target) }
-        guard let best, abs(byte / best - target) <= 4 else {
-            log(String(format: "OBD: raw %.0f matches no scale for Smartcar %.0f %%", byte, target))
-            return nil
+    // MARK: Decoded battery values (from the scan of 21 Nov 2026; interpretation see comments)
+
+    /// 1E40-1E4F: 16 battery temperature sensors, °C = raw / 64 - 40 (0A04 -> 0.06 °C on a cold morning).
+    static let tempDIDs = (0x1E40...0x1E4F).map { String(format: "%04X", $0) }
+
+    private func u(_ hex: String, bytes: Int) -> Double? {
+        guard hex.count >= bytes * 2, let v = UInt32(hex.prefix(bytes * 2), radix: 16) else { return nil }
+        return Double(v)
+    }
+
+    var decodedLocked: [(String, String)] {
+        var out: [(String, String)] = []
+        let temps = Self.tempDIDs.compactMap { extras[$0] }.compactMap { u($0, bytes: 2) }.map { $0 / 64 - 40 }
+        if !temps.isEmpty {
+            let avg = temps.reduce(0, +) / Double(temps.count)
+            out.append(("Batteritemperatur", String(format: "%.1f °C (min %.1f / max %.1f, %d følere)", avg, temps.min()!, temps.max()!, temps.count)))
         }
-        UserDefaults.standard.set(best, forKey: Self.scaleKey)
-        log(String(format: "OBD: scale /%.2f confirmed (raw %.0f -> %.1f %%, Smartcar %.0f %%)", best, byte, byte / best, target))
-        return best
+        if let v = extras["1E3B"].flatMap({ u($0, bytes: 2) }) {
+            let volts = v / 4
+            out.append(("Højspænding", String(format: "%.0f V", volts)))
+            if let a = extras["1E3D"].flatMap({ u($0, bytes: 3) }) {
+                let amps = a / 100 // foreløbig tolkning: 000244 -> 5.8 A while the heating ran
+                out.append(("Strøm (foreløbig)", String(format: "%.1f A ≈ %.1f kW", amps, amps * volts / 1000)))
+            }
+        }
+        if let b = bmsPct { out.append(("Batteristyring (hele batteriet)", String(format: "%.1f %%", b))) }
+        return out
     }
 }

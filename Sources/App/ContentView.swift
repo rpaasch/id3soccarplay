@@ -194,6 +194,8 @@ struct ContentView: View {
                 if let p = obd.lastSocPct { row("Batteri (live)", String(format: "%.1f %%", p)) }
                 row("Kontrolleret mod Smartcar", obd.validated ? "ja" : "ikke endnu")
                 if let raw = obd.lastRaw { Text("Rå: \(raw)").font(.caption.monospaced()).foregroundStyle(.secondary) }
+                ForEach(obd.decoded) { d in row(d.label, d.value) }
+                if let c = obd.calibration { Text("Kalibrering: \(c)").font(.caption).foregroundStyle(.secondary) }
                 if let f = obd.firmware { row("Firmware", f) }
                 if let v = obd.volt12 { row("12 V-batteri", v) }
                 if let t = obd.lastAnswer { row("Sidste svar", t.formatted(date: .omitted, time: .standard)) }
