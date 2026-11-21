@@ -56,7 +56,7 @@ struct ContentView: View {
                 .padding(.horizontal, 16).padding(.vertical, 8)
         }
         .background(Color(.systemGroupedBackground))
-        .refreshable { reload(); await refreshLive() }
+        .refreshable { reload(); await Task { await refreshLive() }.value } // own task: SwiftUI cancels the refresh task when the view redraws
     }
 
     private var carTab: some View {
@@ -229,7 +229,7 @@ struct ContentView: View {
                 row("Siri-tilladelse", siriStatus)
             }
         }
-        .refreshable { reload(); await refreshLive() }
+        .refreshable { reload(); await Task { await refreshLive() }.value } // own task: SwiftUI cancels the refresh task when the view redraws
     }
 
     private var gpsSection: some View {
@@ -364,11 +364,19 @@ struct ContentView: View {
                 liveNote += " Tidspunktet er, hvornår bilen sidst meldte til VW. Det er normalt, når den holder parkeret."
             }
         } catch {
+            // A cancelled request is not a failure; keep what is shown.
+            if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
+            SharedLog.shared.log("app refresh failed: \(error)", category: "app")
+            let why: String = switch (error as? URLError)?.code {
+            case .notConnectedToInternet?, .networkConnectionLost?: "ingen forbindelse"
+            case .timedOut?: "Workeren svarede for langsomt"
+            default: "fejl – se loggen"
+            }
             if let cached: VehicleState = SharedStore.codable(.lastState) {
                 live = cached
-                liveNote = "Workeren svarede ikke (\(error)). Viser sidste kendte måling."
+                liveNote = "Kunne ikke hente friske tal (\(why)). Viser sidste kendte måling."
             } else {
-                liveNote = "Ingen data: \(error)"
+                liveNote = "Ingen data endnu (\(why))."
             }
         }
         entries = SharedLog.shared.entries()
