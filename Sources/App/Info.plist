@@ -26,12 +26,9 @@
 	<string>Måler fart og højde under kørsel, så forbrugsmodellen til Apple Maps passer til din kørsel. Positioner forlader aldrig telefonen.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>Måler fart og højde under kørsel, også når appen ikke er åben, så forbrugsmodellen til Apple Maps passer til din kørsel. Kun fart- og højdeopsummeringer sendes; positioner forlader aldrig telefonen.</string>
-	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Forbinder til din OBD-dongle i bilen og læser batteriprocenten direkte, så Apple Maps får helt friske tal.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>
-		<string>bluetooth-central</string>
 	</array>
 	<key>NSSiriUsageDescription</key>
 	<string>Deler bilens batteriniveau med Apple Maps til ladeplanlægning.</string>

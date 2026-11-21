@@ -7,7 +7,6 @@
 //  in the background without asking. They give exact trip boundaries, which VW's odometer (only
 //  every ~20 min) cannot:
 //   * GPS recording starts/stops immediately,
-//   * the OBD dongle link is woken (skipping the idle back-off),
 //   * the Worker is told, so the trip log starts/ends at the right moment.
 //
 
@@ -16,14 +15,13 @@ import Foundation
 
 struct StartDriveIntent: AppIntent {
     static let title: LocalizedStringResource = "Start kørsel"
-    static let description = IntentDescription("Starter GPS-måling og OBD og fortæller Workeren, at en tur begynder. Brug den i en automatisering: Når CarPlay forbinder.")
+    static let description = IntentDescription("Starter GPS-målingen og fortæller Workeren, at en tur begynder. Brug den i en automatisering: Når CarPlay forbinder.")
     static let openAppWhenRun = false
 
     @MainActor
     func perform() async throws -> some IntentResult {
         SharedLog.shared.log("Drive start (Shortcuts/CarPlay)", category: "drive")
         GPSRecorder.shared.beginDriveNow()
-        OBDManager.shared.wake()
         await DriveEvents.send("start")
         return .result()
     }

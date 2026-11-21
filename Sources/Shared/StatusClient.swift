@@ -109,32 +109,21 @@ private final class RecentState: @unchecked Sendable {
 }
 
 enum StateProvider {
-    enum Origin: String { case live, cache, obd }
-
-    /// Replaces the SoC with the live OBD value (read in the car a few seconds ago) when it is
-    /// fresh and its scaling was validated against Smartcar. Everything else (model hints,
-    /// charging) still comes from the cloud state.
-    static func withOBD(_ s: VehicleState, _ origin: Origin) -> (state: VehicleState, origin: Origin) {
-        guard let r: OBDReading = SharedStore.codable(.obdReading), r.isFreshAndValid, r.at > s.measuredAt else { return (s, origin) }
-        var v = s
-        v.stateOfCharge = r.soc
-        v.measuredAt = r.at
-        return (v, .obd)
-    }
+    enum Origin: String { case live, cache }
 
     /// Best available state: live from the Worker (or a < 15 s old live answer), else the last
     /// cached one, else nil. Background updates pass a longer timeout and retry on timeout.
     static func current(timeout: TimeInterval = 2.5, background: Bool = false) async -> (state: VehicleState, origin: Origin)? {
-        if !background, let recent = RecentState.shared.get(maxAge: 15) { return withOBD(recent, .live) }
+        if !background, let recent = RecentState.shared.get(maxAge: 15) { return (recent, .live) }
         do {
             let state = try await StatusClient.fetch(timeout: timeout, retryOnTimeout: background)
             RecentState.shared.set(state)
             SharedStore.setCodable(state, for: .lastState)
-            return withOBD(state, .live)
+            return (state, .live)
         } catch {
             SharedLog.shared.log("status fetch failed: \(error)", category: "status")
             if let cached: VehicleState = SharedStore.codable(.lastState) {
-                return withOBD(cached, .cache)
+                return (cached, .cache)
             }
             return nil
         }

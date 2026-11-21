@@ -16,8 +16,6 @@ struct ContentView: View {
     @State private var profile: VehicleProfile?
     @State private var loadError: String?
     @State private var live: VehicleState?
-    @State private var cloudState: VehicleState?   // as fetched; `live` = this with the OBD SoC applied
-    @State private var liveIsOBD = false
     @State private var liveNote = "Henter…"
     @State private var hasToken = SharedStore.string(.statusToken)?.isEmpty == false
     @State private var tokenInput = ""
@@ -29,8 +27,6 @@ struct ContentView: View {
     @State private var tripsNote = ""
     @State private var gpsOn = GPSRecorder.shared.enabled
     @State private var gpsNote = ""
-    @State private var obdOn = OBDManager.shared.enabled
-    @State private var obd = OBDManager.shared.status()
 
     var body: some View {
         TabView {
@@ -74,7 +70,7 @@ struct ContentView: View {
                                 Text("\(Int(r.rounded())) km").font(.title.bold()).monospacedDigit()
                                 Text("rækkevidde (bilens bud)").font(.caption).foregroundStyle(.secondary)
                             }
-                            Text(liveIsOBD ? "live fra bilen (OBD)" : ageText(s.measuredAt)).font(.caption).foregroundStyle(.secondary)
+                            Text(ageText(s.measuredAt)).font(.caption).foregroundStyle(.secondary)
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -105,7 +101,6 @@ struct ContentView: View {
             StatusChip(text: "Lader" + (s.chargeKind.map { " \($0.uppercased())" } ?? "") + (s.minutesToFull.map { " · \($0) min" } ?? ""),
                        symbol: "bolt.fill", tint: .yellow)
         }
-        if obdOn, obd.validated { StatusChip(text: "OBD live", symbol: "antenna.radiowaves.left.and.right", tint: .green) }
         if gpsOn { StatusChip(text: GPSRecorder.shared.isRecording ? "GPS måler" : "GPS klar", symbol: "location.fill", tint: .blue) }
         StatusChip(text: warm ? "Varmt batteri" : "Koldt batteri", symbol: warm ? "thermometer.sun.fill" : "snowflake", tint: warm ? .orange : .cyan)
     }
@@ -191,9 +186,6 @@ struct ContentView: View {
     private func temperatureCard(_ m: ModelHints) -> some View {
         Card(title: "Temperatur", symbol: "thermometer.medium") {
             if let t = m.temperatureC { KeyValue(key: "Ude", value: String(format: "%.1f °C", t)) }
-            if obdOn, let bt = obd.decoded.first(where: { $0.label == "Batteritemperatur" }) {
-                KeyValue(key: "Batteri (OBD)", value: bt.value)
-            }
             if let x = m.chargePowerScale {
                 KeyValue(key: "Ladeeffekt i kulden", value: String(format: "×%.2f", x))
             }
@@ -278,7 +270,6 @@ struct ContentView: View {
     private var moreTab: some View {
         List {
             gpsSection
-            obdSection
             connectionSection
             actionSection
             Section {
@@ -303,46 +294,6 @@ struct ContentView: View {
                 if !gpsNote.isEmpty { Text(gpsNote).font(.footnote).foregroundStyle(.secondary) }
             }
             Text("Positioner bliver på telefonen. Kun tid og km pr. fartinterval samt meter op og ned sendes til Workeren. Vælg \"Altid\" som placeringstilladelse, så turen måles uden at appen er åben.")
-                .font(.footnote).foregroundStyle(.secondary)
-        }
-    }
-
-    private var obdSection: some View {
-        Section("OBD-dongle (live batteriprocent)") {
-            Toggle("Brug OBD-dongle", isOn: $obdOn)
-                .onChange(of: obdOn) { _, on in
-                    OBDManager.shared.enabled = on
-                    obd = OBDManager.shared.status()
-                }
-            if obdOn {
-                row("Status", obd.state)
-                if let d = obd.device { row("Dongle", d) }
-                if let p = obd.lastSocPct { row("Batteri (live)", String(format: "%.1f %%", p)) }
-                row("Kontrolleret mod Smartcar", obd.validated ? "ja" : "ikke endnu")
-                if let raw = obd.lastRaw { Text("Rå: \(raw)").font(.caption.monospaced()).foregroundStyle(.secondary) }
-                ForEach(obd.decoded) { d in row(d.label, d.value) }
-                if let c = obd.calibration { Text("Kalibrering: \(c)").font(.caption).foregroundStyle(.secondary) }
-                if let f = obd.firmware { row("Firmware", f) }
-                if let v = obd.volt12 { row("12 V-batteri", v) }
-                if let t = obd.lastAnswer { row("Sidste svar", t.formatted(date: .omitted, time: .standard)) }
-                if obd.okCount + obd.failCount > 0 { row("Svar ok / fejl", "\(obd.okCount) / \(obd.failCount)") }
-                if !obd.extras.isEmpty {
-                    DisclosureGroup("Ekstra batteridata (rå, ikke tolket endnu)") {
-                        ForEach(obd.extras) { x in
-                            Text("\(x.did): \(x.hex)").font(.caption.monospaced())
-                        }
-                    }
-                }
-                Button("Scan batteriets data (1–2 min, bilen tændt)") {
-                    OBDManager.shared.runScan()
-                }
-                if let p = obd.scanProgress { row("Scanning", p) }
-                Button("Kør OBD-test (logger svar)") {
-                    OBDManager.shared.runDiagnostics()
-                }
-                Button("Opdater OBD-status") { obd = OBDManager.shared.status() }
-            }
-            Text("Tænd bilen og luk andre apps, der bruger donglen (BimmerCode, Car Scanner o.l.). Live-tallet bruges kun i Maps, når det passer med Smartcar (højst 4 procentpoint forskel).")
                 .font(.footnote).foregroundStyle(.secondary)
         }
     }
@@ -388,25 +339,12 @@ struct ContentView: View {
         HStack { Text(k); Spacer(); Text(v).foregroundStyle(.secondary) }
     }
 
-    /// Shows the dongle's live SoC (fresh and validated) instead of the cloud value, which is
-    /// 2-5 minutes old and lags several percent while fast charging.
-    private func applyOBD() {
-        guard let c = cloudState else { return }
-        let r = StateProvider.withOBD(c, .live)
-        live = r.state
-        liveIsOBD = r.origin == .obd
-    }
-
-    /// While the app is open: OBD value every 5 s, cloud every 60 s (every 30 s while charging).
+    /// While the app is open: refetch every 60 s (every 30 s while charging).
     private func liveLoop() async {
-        var tick = 0
         while !Task.isCancelled {
-            try? await Task.sleep(for: .seconds(5))
-            tick += 1
-            obd = OBDManager.shared.status()
-            applyOBD()
-            let every = (cloudState?.isCharging == true) ? 6 : 12
-            if tick % every == 0 { await Task { await refreshLive() }.value }
+            try? await Task.sleep(for: .seconds(live?.isCharging == true ? 30 : 60))
+            if Task.isCancelled { return }
+            await Task { await refreshLive() }.value
         }
     }
 
@@ -434,13 +372,11 @@ struct ContentView: View {
         do {
             let s = try await StatusClient.fetch(timeout: 8)
             SharedStore.setCodable(s, for: .lastState)
-            cloudState = s
-            applyOBD()
+            live = s
             liveNote = "Hentet fra Workeren."
             if let r = try? await TripsClient.fetch() { trips = r.trips; tripsNote = "" } else { tripsNote = "Kunne ikke hente turene." }
             await GPSRecorder.shared.flushQueue()
             refreshGPSNote()
-            obd = OBDManager.shared.status()
             if Date().timeIntervalSince(s.measuredAt) > 1800 && !s.isCharging {
                 liveNote += " Tidspunktet er, hvornår bilen sidst meldte til VW. Det er normalt, når den holder parkeret."
             }
@@ -454,7 +390,7 @@ struct ContentView: View {
             default: "fejl – se loggen"
             }
             if let cached: VehicleState = SharedStore.codable(.lastState) {
-                cloudState = cached; applyOBD()
+                live = cached
                 liveNote = "Kunne ikke hente friske tal (\(why)). Viser sidste kendte måling."
             } else {
                 liveNote = "Ingen data endnu (\(why))."
