@@ -53,6 +53,21 @@ struct TripCalibration: Codable, Sendable {
 struct TripsResponse: Decodable, Sendable {
     let trips: [Trip]
     let calibration: TripCalibration?
+    let bands: [TempBand]?
+    let temperatureC: Double?
+}
+
+/// One 5 °C band: its own consumption factor and how much of the charge curve is learned there.
+struct TempBand: Decodable, Identifiable, Sendable {
+    let band: Int
+    let km: Double
+    let n: Int
+    /// nil while the band has less than 40 km.
+    let factor: Double?
+    let chargeWarm: Int
+    let chargeCold: Int
+    let current: Bool
+    var id: Int { band }
 }
 
 enum TripsClient {

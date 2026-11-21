@@ -25,6 +25,7 @@ struct ContentView: View {
     @State private var siriStatus = "unknown"
     @State private var trips: [Trip] = []
     @State private var tripsNote = ""
+    @State private var bands: [TempBand] = []
     @State private var gpsOn = GPSRecorder.shared.enabled
     @State private var gpsNote = ""
 
@@ -223,11 +224,12 @@ struct ContentView: View {
                                 .padding(.horizontal, 10).padding(.vertical, 5)
                                 .background(Color(.tertiarySystemFill), in: Capsule())
                         }
-                        Text("Bilen bruger \(abs(pct)) % \(pct >= 0 ? "mere" : "mindre") strøm end ren fysik siger. Maps får forbruget ganget med dette tal" + (c.scope == "temperature" ? ", målt ved omtrent samme temperatur som nu." : "."))
+                        Text("Bilen bruger \(abs(pct)) % \(pct >= 0 ? "mere" : "mindre") strøm end ren fysik siger. Maps får forbruget ganget med dette tal. Det bygger på \(c.sourceText).")
                             .font(.callout).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                if !bands.isEmpty { bandsCard }
                 let shown = Array(trips.prefix(20))
                 let scale = (shown.flatMap { [$0.kwhPer100, $0.mapsValue] }.max() ?? 30) * 1.05
                 ForEach(groupedByDay(shown)) { group in
@@ -238,6 +240,47 @@ struct ContentView: View {
                     .font(.footnote).foregroundStyle(.secondary)
             }
         }
+    }
+
+    /// Every 5 °C band the car has been driven or charged in: its own factor and charge-curve status.
+    private var bandsCard: some View {
+        Card(title: "Temperaturbånd", symbol: "thermometer.snowflake") {
+            Text("Bilen bruger forskelligt efter temperaturen. Hvert bånd husker sine egne seneste 15 ture, så vinteren stadig er kendt til foråret. Maps bruger båndet for dagens temperatur.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(spacing: 2) {
+                ForEach(bands) { b in bandRow(b) }
+            }
+            HStack(spacing: 14) {
+                Label("lader lært, varmt batteri", systemImage: "bolt.fill").foregroundStyle(.orange)
+                Label("koldt", systemImage: "bolt.fill").foregroundStyle(.cyan)
+            }
+            .font(.caption2)
+        }
+    }
+
+    private func bandRow(_ b: TempBand) -> some View {
+        HStack(spacing: 10) {
+            Text("\(b.band) til \(b.band + 5) °C")
+                .font(.callout.weight(b.current ? .semibold : .regular)).monospacedDigit()
+                .frame(width: 110, alignment: .leading)
+            if let f = b.factor {
+                Text("×" + DK.num(f, 2)).font(.callout.bold()).monospacedDigit()
+                Text("\(DK.num(b.km, 0)) km").font(.caption).foregroundStyle(.secondary).monospacedDigit()
+            } else {
+                Text(b.km > 0 ? "\(DK.num(b.km, 0)) km – for lidt" : "ingen ture").font(.caption).foregroundStyle(.tertiary)
+            }
+            Spacer(minLength: 4)
+            if b.chargeWarm > 0 { Image(systemName: "bolt.fill").foregroundStyle(.orange) }
+            if b.chargeCold > 0 { Image(systemName: "bolt.fill").foregroundStyle(.cyan) }
+            if b.current {
+                Text("nu").font(.caption2.bold()).padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Color.teal.opacity(0.2), in: Capsule()).foregroundStyle(.teal)
+            }
+        }
+        .padding(.vertical, 6).padding(.horizontal, 8)
+        .background(b.current ? Color.teal.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .accessibilityElement(children: .combine)
     }
 
     private struct DayGroup: Identifiable { let day: String; var trips: [Trip]; var id: String { day } }
@@ -487,7 +530,7 @@ struct ContentView: View {
             SharedStore.setCodable(s, for: .lastState)
             live = s
             liveNote = "Hentet fra Workeren."
-            if let r = try? await TripsClient.fetch() { trips = r.trips; tripsNote = "" } else { tripsNote = "Kunne ikke hente turene." }
+            if let r = try? await TripsClient.fetch() { trips = r.trips; bands = r.bands ?? []; tripsNote = "" } else { tripsNote = "Kunne ikke hente turene." }
             await GPSRecorder.shared.flushQueue()
             refreshGPSNote()
             if Date().timeIntervalSince(s.measuredAt) > 1800 && !s.isCharging {

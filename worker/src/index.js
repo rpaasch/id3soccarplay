@@ -955,9 +955,11 @@ async function finishTrip(env, trip, end) {
   const trips = (await env.STATE.get("trips", "json")) || [];
   // What Maps was actually given for this trip: the physics prediction times the calibration
   // in force when the trip started (from the trips before it).
-  rec.mapsFactor = tripCalibration(trips, rec.tempC)?.factor ?? 1;
+  const bandsBefore = await getBands(env, trips);
+  rec.mapsFactor = bandCalibration(bandsBefore, trips, rec.tempC)?.factor ?? 1;
   trips.push(rec);
   await kvPut(env, "trips", JSON.stringify(trips.slice(-100)));
+  await recordBand(env, trips, bandsBefore);
 }
 
 async function lateOdometer(env, snap, prevEntry) {
@@ -984,7 +986,77 @@ async function lateOdometer(env, snap, prevEntry) {
     ratio: Math.round((last.kwh / predicted) * 100) / 100, lateOdoKm: r1(extra),
   });
   await kvPut(env, "trips", JSON.stringify(trips));
+  await recordBand(env, trips, await getBands(env, trips));
   return true;
+}
+
+// ---------- Temperature bands: long-term memory of the trip calibration ----------
+// Each 5 C band (same bands as the charge curves: "0" = 0..5 C) keeps its own last BAND_KEEP
+// counted trips, so winter is still known in spring after the trip list (100) has moved on.
+// Maps gets the factor of today's band; with too little data the two nearest bands are blended.
+const BAND_KEEP = 15;
+const BAND_MIN_KM = 40;
+
+function tripCounts(x) {
+  return x.km >= 20 && x.predictedKwh > 0 && x.ratio > 0.5 && x.ratio < 2.5 && typeof x.tempC === "number";
+}
+
+// Insert or replace (by start time) one trip; a trip only ever sits in one band.
+function upsertBand(bands, x) {
+  for (const k of Object.keys(bands)) bands[k] = bands[k].filter((e) => e.s !== x.start);
+  if (!tripCounts(x)) return;
+  const b = tempBand(x.tempC);
+  const list = (bands[b] ||= []);
+  list.push({ s: x.start, km: r1(x.km), kwh: r1(x.kwh), pred: r1(x.predictedKwh) });
+  list.sort((a, c) => a.s - c.s);
+  bands[b] = list.slice(-BAND_KEEP);
+}
+
+function bandsFromTrips(trips) {
+  const bands = {};
+  for (const x of joinShortStops(trips)) upsertBand(bands, x);
+  return bands;
+}
+
+// Stored bands, or (first time) rebuilt from the trip list.
+async function getBands(env, trips) {
+  return (await env.STATE.get("temp_bands", "json")) || bandsFromTrips(trips);
+}
+
+// After a trip was added or changed: (re)place the newest trip (joined across a short stop).
+async function recordBand(env, trips, bands) {
+  const last = joinShortStops(trips.slice(-6)).at(-1);
+  if (last) upsertBand(bands, last);
+  await kvPut(env, "temp_bands", JSON.stringify(bands));
+}
+
+function bandSummary(bands) {
+  const out = {};
+  for (const [b, list] of Object.entries(bands || {})) {
+    const km = list.reduce((a, e) => a + e.km, 0), kwh = list.reduce((a, e) => a + e.kwh, 0), pred = list.reduce((a, e) => a + e.pred, 0);
+    if (pred > 0) out[b] = { km: Math.round(km), n: list.length, factor: Math.round((kwh / pred) * 100) / 100 };
+  }
+  return out;
+}
+
+function bandCalibration(bands, trips, tempC) {
+  const all = () => { const a = tripCalibration(trips, null); return a ? { ...a, scope: "all" } : null; };
+  if (typeof tempC !== "number") return all();
+  const sum = bandSummary(bands);
+  const own = sum[tempBand(tempC)];
+  if (own && own.km >= BAND_MIN_KM) return { ...own, scope: "band", band: Number(tempBand(tempC)) };
+  const centre = (b) => b + 2.5;
+  const usable = Object.keys(sum).filter((k) => sum[k].km >= BAND_MIN_KM).map(Number);
+  const below = usable.filter((b) => centre(b) <= tempC && tempC - centre(b) <= 10).sort((a, b) => b - a)[0];
+  const above = usable.filter((b) => centre(b) >= tempC && centre(b) - tempC <= 10).sort((a, b) => a - b)[0];
+  if (below != null && above != null && below !== above) {
+    const w = (tempC - centre(below)) / (centre(above) - centre(below));
+    const f = sum[below].factor * (1 - w) + sum[above].factor * w;
+    return { factor: Math.round(f * 100) / 100, km: sum[below].km + sum[above].km, n: sum[below].n + sum[above].n, scope: "blend", bands: [below, above] };
+  }
+  const one = below ?? above;
+  if (one != null) return { ...sum[one], scope: "nearby", band: one };
+  return all();
 }
 
 // ---------- iPhone GPS aggregates (no positions: seconds/km per speed bin, metres up/down) ----------
@@ -1143,12 +1215,41 @@ function withMapsKwh(trips) {
   });
 }
 
+// One row per 5 C band from the coldest to the warmest known (and today's): consumption factor
+// and how much of the charge curve is learned with a warm / cold battery.
+async function bandRows(env, bands, tempC) {
+  const sum = bandSummary(bands);
+  const charge = {};
+  const list = await env.STATE.list({ prefix: "learn_charge_" });
+  for (const k of list.keys) {
+    const m = k.name.match(/^learn_charge_(-?\d+)(_w)?$/);
+    if (!m) continue;
+    const d = await env.STATE.get(k.name, "json");
+    const pts = (d?.bins || []).filter((b) => b.length).length;
+    (charge[m[1]] ||= {})[m[2] ? "warm" : "cold"] = pts;
+  }
+  const keys = [...Object.keys(sum), ...Object.keys(charge)].map(Number);
+  const now = typeof tempC === "number" ? Number(tempBand(tempC)) : null;
+  if (now != null) keys.push(now);
+  if (!keys.length) return [];
+  const rows = [];
+  for (let b = Math.max(...keys); b >= Math.min(...keys); b -= 5) {
+    const s = sum[String(b)];
+    rows.push({
+      band: b, km: s?.km ?? 0, n: s?.n ?? 0, factor: s && s.km >= BAND_MIN_KM ? s.factor : null,
+      chargeWarm: charge[String(b)]?.warm ?? 0, chargeCold: charge[String(b)]?.cold ?? 0, current: b === now,
+    });
+  }
+  return rows;
+}
+
 async function tripsEndpoint(request, env) {
   const url = new URL(request.url);
   const token = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || url.searchParams.get("token");
   if (!env.STATUS_TOKEN || token !== env.STATUS_TOKEN) return new Response("unauthorized", { status: 401 });
   const trips = (await env.STATE.get("trips", "json")) || [];
   const t = (await outdoorTempInfo(env, null)).t;
+  const bands = await getBands(env, trips);
   return new Response(JSON.stringify({
     // Shown as driven: parts split by a short stop are one trip; `counted` = used for calibration.
     trips: joinShortStops(withMapsKwh(trips)).slice(-50).reverse().map((x) => ({
@@ -1156,7 +1257,8 @@ async function tripsEndpoint(request, env) {
       mapsPer100: r1((x.mapsKwh / x.km) * 100), mapsRatio: Math.round((x.kwh / x.mapsKwh) * 100) / 100,
     })),
     current: await env.STATE.get("trip_current", "json"),
-    calibration: tripCalibration(trips, t), temperatureC: t,
+    calibration: bandCalibration(bands, trips, t), temperatureC: t,
+    bands: await bandRows(env, bands, t),
   }), { headers: { "content-type": "application/json" } });
 }
 
@@ -1394,7 +1496,7 @@ async function buildModel(env, snap, ctx) {
   }
   if (Object.keys(bySpeed).length) model.consumptionBySpeed = bySpeed;
   const mode = shapeMode || "physics"; // default since the bin meaning was confirmed
-  const cal = mode === "physics" ? tripCalibration(trips, t) : null;
+  const cal = mode === "physics" ? bandCalibration((await kvJsonCached(env, "temp_bands")) || bandsFromTrips(trips || []), trips || [], t) : null;
   if (cal) {
     // Calibrated by your own trips: physics x (actual/predicted). Replaces car estimate + margin.
     const p = physicsParts(t);

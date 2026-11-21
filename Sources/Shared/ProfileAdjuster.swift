@@ -56,7 +56,22 @@ struct TripCalibrationHint: Codable, Sendable {
     let factor: Double
     let km: Double
     let n: Int
+    /// "band" (today's 5 °C band), "blend" (the two nearest bands), "nearby" (one nearby band), "all".
     let scope: String
+    let band: Int?
+    let bands: [Int]?
+
+    /// Plain-Danish description of where the factor comes from.
+    var sourceText: String {
+        func range(_ b: Int) -> String { "\(b) til \(b + 5) °C" }
+        switch scope {
+        case "band": return band.map { "ture ved \(range($0))" } ?? "ture ved samme temperatur"
+        case "blend": return bands.map { "en blanding af \(range($0[0])) og \(range($0[1]))" } ?? "de nærmeste temperaturer"
+        case "nearby": return band.map { "ture ved \(range($0)) (ingen endnu ved dagens temperatur)" } ?? "ture ved en nærliggende temperatur"
+        case "temperature": return "ture ved omtrent samme temperatur"
+        default: return "alle ture (ingen ved temperaturer i nærheden)"
+        }
+    }
 }
 
 extension JSONObject {
