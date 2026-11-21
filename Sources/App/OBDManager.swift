@@ -131,6 +131,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var failCount = 0
     private var extras: [String: String] = [:]
     private var tick = 0
+    private var connectedAt = Date()
     private var scanQueue: [String] = []
     private var scanTotal = 0
     private var scanHits = 0
@@ -216,6 +217,8 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func centralManager(_ central: CBCentralManager, didConnect p: CBPeripheral) {
         UserDefaults.standard.set(p.identifier.uuidString, forKey: Self.deviceKey)
+        connectedAt = Date()
+        lastAnswer = nil
         state = "forbundet, finder kanal…"
         log("OBD: connected \(p.name ?? "?")")
         p.discoverServices(nil)
@@ -272,7 +275,16 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     // MARK: ELM327 command flow
 
+    /// Hard safety rule: only dongle settings ("AT…") and UDS ReadDataByIdentifier ("22" + 4 hex)
+    /// ever leave this app. No coding, writing, security access, routines or session changes.
+    static func isAllowed(_ cmd: String) -> Bool {
+        let c = cmd.uppercased()
+        if c.hasPrefix("AT") { return c.allSatisfy { $0.isLetter || $0.isNumber } }
+        return c.count == 6 && c.hasPrefix("22") && c.allSatisfy(\.isHexDigit)
+    }
+
     private func send(_ cmd: String, then handler: ((String) -> Void)? = nil) {
+        guard Self.isAllowed(cmd) else { log("OBD: blocked non-read command \(cmd)"); return }
         guard let p = peripheral, let w = writeChar else { return }
         waiting = cmd
         responseHandler = handler
@@ -352,6 +364,13 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             guard let self, self.ready, self.waiting == nil, self.pending.isEmpty,
                   !self.diagRunning, self.scanQueue.isEmpty else { return }
             self.tick += 1
+            // Car off (no good answer for 3 min): drop the link so the dongle can sleep and
+            // spare the 12 V battery. The pending reconnect wakes us when the car starts again.
+            if let p = self.peripheral, Date().timeIntervalSince(self.lastAnswer ?? self.connectedAt) > 180 {
+                self.log("OBD: car silent for 3 min, disconnecting so the dongle can sleep")
+                self.central?.cancelPeripheralConnection(p)
+                return
+            }
             if self.tick % 12 == 0 {                    // every ~60 s: the car's 12 V battery
                 self.send("ATRV")
             } else if self.tick % 3 == 0 {              // every ~15 s: one extra battery value, in turn
