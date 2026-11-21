@@ -240,8 +240,11 @@ struct ContentView: View {
     private var chargingTab: some View {
         scrollPage {
             if let p = profile {
-                let points = curvePoints(profile: p, hints: live?.model)
-                Card(title: "Ladekurve (det Maps får)", symbol: "chart.xyaxis.line") {
+                let m = live?.model
+                let points = curvePoints(profile: p, hints: m)
+                Card(title: "Sådan regner Maps med, at bilen lader", symbol: "chart.xyaxis.line") {
+                    Text("Kurven viser, hvor mange kW bilen tager imod ved hver batteriprocent på en hurtiglader. Maps bruger den til at regne ladetid og ladestop ud.")
+                        .font(.callout).foregroundStyle(.secondary)
                     if points.isEmpty {
                         Text("Ingen kurve.").foregroundStyle(.secondary)
                     } else {
@@ -255,29 +258,92 @@ struct ContentView: View {
                                 .symbolSize(pt.learned ? 60 : 25)
                         }
                         .chartXScale(domain: 0...100)
-                        .chartXAxisLabel("Batteri (%)")
-                        .chartYAxisLabel("kW")
-                        .frame(height: 220)
-                        let capacityKwh = p.adjusted(with: live?.model).profile.battery.usableCapacityWh / 1000
-                        HStack(spacing: 12) {
-                            if let m = chargeMinutes(from: 10, to: 80, points: points, capacityKwh: capacityKwh) {
-                                stat("10 → 80 %", "\(Int(m.rounded())) min")
+                        .chartXAxis {
+                            AxisMarks(values: [0.0, 20, 40, 60, 80, 100]) { v in
+                                AxisGridLine()
+                                AxisValueLabel { if let x = v.as(Double.self) { Text("\(Int(x)) %") } }
                             }
-                            if let peak = points.map(\.kw).max() { stat("Top", "\(Int(peak.rounded())) kW") }
                         }
-                        Text("Grønne punkter er lært af dine egne hurtigladninger.").font(.caption).foregroundStyle(.secondary)
+                        .chartYAxisLabel("kW")
+                        .frame(height: 200)
+                        HStack(spacing: 16) {
+                            legend(.green, "målt ved dine ladninger")
+                            legend(.gray, "standardkurve")
+                        }
+                        .font(.caption)
+
+                        let capacityKwh = p.adjusted(with: m).profile.battery.usableCapacityWh / 1000
+                        HStack(spacing: 12) {
+                            if let mins = chargeMinutes(from: 10, to: 80, points: points, capacityKwh: capacityKwh) {
+                                stat("fra 10 til 80 %", "\(Int(mins.rounded())) min")
+                            }
+                            if let peak = points.map(\.kw).max() { stat("højeste effekt", "\(Int(peak.rounded())) kW") }
+                        }
+                        .padding(.top, 4)
+                        Text(chargeConditions(m))
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                if let m = live?.model {
-                    Card(title: "Det er lært", symbol: "brain") {
-                        let bins = (m.chargeCurveKw ?? []).compactMap { $0 }.count
-                        KeyValue(key: "Kurve", value: bins > 0 ? "\(bins)/11 punkter, \(m.chargeCurveWarm == true ? "varmt" : "koldt") batteri" : "endnu ikke lært")
-                        KeyValue(key: "Ladninger", value: "\(m.chargeSessions ?? 0)")
-                        if let c = m.capacityKwhNet { KeyValue(key: "Batteri (netto)", value: "\(Int(c)) kWh") }
+                if let m {
+                    Card(title: "Det har appen lært", symbol: "brain") {
+                        let curve = m.chargeCurveKw ?? []
+                        let learned = curve.compactMap { $0 }.count
+                        if learned > 0 {
+                            Text("\(learned) af \(max(curve.count, 11)) punkter på kurven er målt ved dine egne hurtigladninger med \(m.chargeCurveWarm == true ? "varmt" : "koldt") batteri (\(m.chargeSessions ?? 0) \((m.chargeSessions ?? 0) == 1 ? "ladning" : "ladninger") i alt). Resten er standardkurven.")
+                                .font(.callout)
+                            if let gaps = missingRanges(curve) {
+                                Text("Mangler stadig: \(gaps). De punkter lærer appen, næste gang du lader i det område.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        } else {
+                            Text("Der er endnu ingen målinger ved den temperatur. Maps bruger standardkurven, indtil du har hurtigladet.")
+                                .font(.callout)
+                        }
+                        if let c = m.capacityKwhNet {
+                            KeyValue(key: "Brugbart batteri", value: "\(Int(c)) kWh")
+                        }
+                        Text("Appen lærer automatisk, hver gang bilen hurtiglader. Varmt batteri (lige efter kørsel) og koldt batteri læres hver for sig, fordi et koldt batteri lader langsommere.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }
         }
+    }
+
+    private func legend(_ color: Color, _ text: String) -> some View {
+        HStack(spacing: 5) {
+            Circle().fill(color).frame(width: 8, height: 8)
+            Text(text).foregroundStyle(.secondary)
+        }
+    }
+
+    /// The conditions the curve applies to, in plain words.
+    private func chargeConditions(_ m: ModelHints?) -> String {
+        var parts: [String] = []
+        if let m {
+            parts.append(m.chargeCurveWarm == true ? "Gælder et varmt batteri" : "Gælder et koldt batteri")
+            if let t = m.temperatureC { parts[0] += " ved \(DK.num(t, 0)) °C ude" }
+            parts[0] += "."
+            if let x = m.chargePowerScale, x < 0.99 {
+                parts.append("Kulden trækker effekten ned med \(Int(((1 - x) * 100).rounded())) %.")
+            }
+        }
+        parts.append("Tiden forudsætter, at laderen kan levere fuld effekt. Deler du laderen med en anden bil, går det langsommere.")
+        return parts.joined(separator: " ")
+    }
+
+    /// Battery ranges whose curve points are not learned yet, e.g. "0–10 % og 80–100 %".
+    private func missingRanges(_ curve: [Double?]) -> String? {
+        guard curve.count >= 2 else { return nil }
+        let step = 100 / (curve.count - 1)
+        var ranges: [(Int, Int)] = []
+        for (i, v) in curve.enumerated() where v == nil {
+            let pct = i * step
+            if let last = ranges.last, last.1 == pct - step { ranges[ranges.count - 1].1 = pct } else { ranges.append((pct, pct)) }
+        }
+        guard !ranges.isEmpty else { return nil }
+        let texts = ranges.map { $0.0 == $0.1 ? "\($0.0) %" : "\($0.0)–\($0.1) %" }
+        return texts.count == 1 ? texts[0] : texts.dropLast().joined(separator: ", ") + " og " + texts.last!
     }
 
     private func stat(_ label: String, _ value: String) -> some View {
