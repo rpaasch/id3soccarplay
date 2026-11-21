@@ -176,7 +176,11 @@ struct TripCard: View {
     }
 
     private var verdict: String {
-        guard trip.isCounted else { return "For kort til at tælle med – batteriet melder kun hele procent." }
+        guard trip.isCounted else {
+            return trip.km < 20
+                ? "For kort til at tælle med – batteriet melder kun hele procent."
+                : "Tæller ikke med – forbruget ligger så langt fra det forventede, at målingen nok er forkert."
+        }
         let pct = Int(((trip.ratio - 1) * 100).rounded())
         switch trip.ratio {
         case ..<0.95: return "Brugte \(-pct) % mindre end forudsagt"

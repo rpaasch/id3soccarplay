@@ -556,7 +556,10 @@ async function learn(env, snap) {
       const rd = await env.STATE.get("recent_drive", "json");
       if (!rd || snap.measuredAt - rd.at > 5 * 60 * 1000) await kvPut(env, "recent_drive", JSON.stringify({ at: snap.measuredAt }));
     }
-    await trackTrip(env, snap, prevEntry, t, log);
+    // VW often sends the last odometer step minutes after the car stopped (21 Nov: 27 km logged,
+    // 58 km driven; the rest arrived with the charging start). Give it to the trip that just ended.
+    const late = await lateOdometer(env, snap, prevEntry);
+    await trackTrip(env, snap, late ? { ...prevEntry, odo: snap.odometerKm } : prevEntry, t, log);
     await learnConsumption(env, snap, t);
     await learnCharging(env, snap, t, log);
   } catch (e) {
@@ -946,12 +949,39 @@ async function finishTrip(env, trip, end) {
     kwh: r1(kwh), kwhPer100: r1((kwh / km) * 100), tempC: tempC == null ? null : r1(tempC),
     avgKmh: Math.round(km / hours), binKm: binKm.map(r1),
     predictedKwh: r1(predicted), predictedPer100: r1((predicted / km) * 100), ratio: Math.round((kwh / predicted) * 100) / 100,
-    cold: coldStart, parkedH: trip.parkedH,
+    cold: coldStart, parkedH: trip.parkedH, odoFrom: trip.start.odo, odoTo: end.odo,
   };
   applyGps(rec, await env.STATE.get("gps_segments", "json"));
   const trips = (await env.STATE.get("trips", "json")) || [];
   trips.push(rec);
   await kvPut(env, "trips", JSON.stringify(trips.slice(-100)));
+}
+
+async function lateOdometer(env, snap, prevEntry) {
+  if (typeof snap.odometerKm !== "number" || !prevEntry || typeof prevEntry.odo !== "number" || snap.odometerKm <= prevEntry.odo) return false;
+  if (await env.STATE.get("trip_current")) return false; // a trip is running: it gets the km normally
+  const trips = (await env.STATE.get("trips", "json")) || [];
+  const last = trips[trips.length - 1];
+  if (!last || typeof last.odoTo !== "number" || snap.odometerKm <= last.odoTo) return false;
+  const after = snap.measuredAt - last.end;
+  if (after < 0 || after > 30 * 60 * 1000) return false;
+  // Not driven since: the battery has not dropped further (or it is charging).
+  if (snap.charging !== true && snap.soc < last.socTo - 0.01) return false;
+  const extra = snap.odometerKm - last.odoTo;
+  if (extra > last.km * 3 + 20) return false; // implausible: leave it
+  const km = last.km + extra;
+  const f = km / last.km;
+  const binKm = (last.binKm || []).map((k) => k * f);
+  const hours = (last.end - last.start) / 3600000;
+  const predicted = binKm.length === 10 ? predictTripKwh(binKm, hours, last.tempC, last.cold) : last.predictedKwh * f;
+  Object.assign(last, {
+    km: r1(km), odoTo: snap.odometerKm, binKm: binKm.map(r1), kwhPer100: r1((last.kwh / km) * 100),
+    avgKmh: hours > 0 ? Math.round(km / hours) : last.avgKmh,
+    predictedKwh: r1(predicted), predictedPer100: r1((predicted / km) * 100),
+    ratio: Math.round((last.kwh / predicted) * 100) / 100, lateOdoKm: r1(extra),
+  });
+  await kvPut(env, "trips", JSON.stringify(trips));
+  return true;
 }
 
 // ---------- iPhone GPS aggregates (no positions: seconds/km per speed bin, metres up/down) ----------
