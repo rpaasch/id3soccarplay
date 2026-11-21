@@ -199,20 +199,39 @@ struct ContentView: View {
             } else {
                 if let c = live?.model?.tripCalibration {
                     Card(title: "Kalibrering", symbol: "dial.medium") {
-                        HStack(alignment: .firstTextBaseline) {
-                            Text(String(format: "×%.2f", c.factor)).font(.largeTitle.bold()).monospacedDigit()
-                            Text("bilen bruger \(Int(((c.factor - 1) * 100).rounded())) % mere end ren fysik")
-                                .font(.callout).foregroundStyle(.secondary)
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text("×" + DK.num(c.factor, 2)).font(.system(size: 44, weight: .bold, design: .rounded)).monospacedDigit()
+                            VStack(alignment: .leading, spacing: 2) {
+                                let pct = Int(((c.factor - 1) * 100).rounded())
+                                Text(pct >= 0 ? "\(pct) % mere end ren fysik" : "\(-pct) % mindre end ren fysik").font(.callout.weight(.semibold))
+                                Text("Maps får forbruget ganget med dette tal.").font(.caption).foregroundStyle(.secondary)
+                            }
                         }
-                        Text(String(format: "Ud fra %d ture og %.0f km ved samme temperatur.", c.n, c.km))
+                        Text("Ud fra \(c.n) \(c.n == 1 ? "tur" : "ture") og \(DK.num(c.km, 0)) km" + (c.scope == "temperature" ? " ved omtrent samme temperatur som nu." : "."))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                ForEach(trips.prefix(20)) { TripCard(trip: $0) }
-                Text("×1,00 = bilen brugte præcis det, modellen (og dermed Maps) regnede med. Korte ture er usikre, fordi batteriet melder i hele procent.")
+                let shown = Array(trips.prefix(20))
+                let scale = (shown.flatMap { [$0.kwhPer100, $0.predictedPer100] }.max() ?? 30) * 1.05
+                ForEach(groupedByDay(shown)) { group in
+                    Text(group.day).font(.title3.bold()).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
+                    ForEach(group.trips) { TripCard(trip: $0, scale: scale) }
+                }
+                Text("Brugte = kWh pr. 100 km ud fra batteriets fald. Maps = hvad modellen forudsagde for samme fart og temperatur. Ture under 20 km tæller ikke med, fordi batteriet melder i hele procent.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
         }
+    }
+
+    private struct DayGroup: Identifiable { let day: String; var trips: [Trip]; var id: String { day } }
+
+    private func groupedByDay(_ trips: [Trip]) -> [DayGroup] {
+        var out: [DayGroup] = []
+        for t in trips {
+            let d = DK.day(t.startDate)
+            if out.last?.day == d { out[out.count - 1].trips.append(t) } else { out.append(DayGroup(day: d, trips: [t])) }
+        }
+        return out
     }
 
     private var chargingTab: some View {

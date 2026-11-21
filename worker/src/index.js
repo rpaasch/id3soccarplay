@@ -1031,7 +1031,13 @@ function joinShortStops(trips) {
     if (p && typeof t.start === "number" && typeof p.end === "number" && t.start - p.end <= 10 * 60e3 && t.start >= p.end - 60e3) {
       const km = p.km + t.km, kwh = p.kwh + t.kwh, predictedKwh = (p.predictedKwh || 0) + (t.predictedKwh || 0);
       const tempC = typeof p.tempC === "number" && typeof t.tempC === "number" ? (p.tempC * p.km + t.tempC * t.km) / km : (p.tempC ?? t.tempC);
-      out[out.length - 1] = { ...p, end: t.end, km, kwh, predictedKwh, tempC, socTo: t.socTo, ratio: predictedKwh > 0 ? kwh / predictedKwh : p.ratio, joined: (p.joined || 1) + 1 };
+      const hours = (t.end - p.start) / 3600e3;
+      out[out.length - 1] = {
+        ...p, end: t.end, km, kwh, predictedKwh, tempC, socTo: t.socTo,
+        ratio: predictedKwh > 0 ? Math.round(kwh / predictedKwh * 100) / 100 : p.ratio,
+        kwhPer100: Math.round(kwh / km * 1000) / 10, predictedPer100: Math.round(predictedKwh / km * 1000) / 10,
+        avgKmh: hours > 0 ? Math.round(km / hours) : p.avgKmh, joined: (p.joined || 1) + 1,
+      };
     } else out.push(t);
   }
   return out;
@@ -1101,7 +1107,9 @@ async function tripsEndpoint(request, env) {
   const trips = (await env.STATE.get("trips", "json")) || [];
   const t = (await outdoorTempInfo(env, null)).t;
   return new Response(JSON.stringify({
-    trips: trips.slice(-50).reverse(), current: await env.STATE.get("trip_current", "json"),
+    // Shown as driven: parts split by a short stop are one trip; `counted` = used for calibration.
+    trips: joinShortStops(trips).slice(-50).reverse().map((x) => ({ ...x, counted: x.km >= 20 && x.ratio > 0.5 && x.ratio < 2.5 })),
+    current: await env.STATE.get("trip_current", "json"),
     calibration: tripCalibration(trips, t), temperatureC: t,
   }), { headers: { "content-type": "application/json" } });
 }

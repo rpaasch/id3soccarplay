@@ -23,9 +23,16 @@ struct Trip: Decodable, Identifiable, Sendable {
     let predictedPer100: Double
     let ratio: Double
     let cold: Bool?
+    /// Number of parts joined across short stops (nil = one part).
+    let joined: Int?
+    /// Used for the calibration (>= 20 km and a plausible ratio).
+    let counted: Bool?
 
     var id: Double { start }
     var startDate: Date { Date(timeIntervalSince1970: start / 1000) }
+    var endDate: Date { Date(timeIntervalSince1970: end / 1000) }
+    var minutes: Int { max(1, Int(((end - start) / 60000).rounded())) }
+    var isCounted: Bool { counted ?? (km >= 20) }
 }
 
 struct TripCalibration: Codable, Sendable {

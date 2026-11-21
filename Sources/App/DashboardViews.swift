@@ -128,56 +128,104 @@ struct SpeedBinsChart: View {
     }
 }
 
-/// One trip with actual vs predicted consumption.
+/// Danish formatting regardless of the phone's language.
+enum DK {
+    static let locale = Locale(identifier: "da_DK")
+    static func num(_ v: Double, _ decimals: Int = 1) -> String {
+        v.formatted(.number.precision(.fractionLength(decimals)).locale(locale))
+    }
+    static func time(_ d: Date) -> String { d.formatted(.dateTime.hour().minute().locale(locale)) }
+    static func day(_ d: Date) -> String {
+        let cal = Calendar.current
+        if cal.isDateInToday(d) { return "I dag" }
+        if cal.isDateInYesterday(d) { return "I går" }
+        return d.formatted(.dateTime.weekday(.wide).day().month(.wide).locale(locale)).capitalized(with: locale)
+    }
+}
+
+/// One trip: when, how far, and what it used compared with what Maps was told.
 struct TripCard: View {
     let trip: Trip
+    /// Shared bar scale (kWh/100 km) so trips can be compared with each other.
+    let scale: Double
 
-    private var verdict: (String, Color) {
+    private var tint: Color {
+        guard trip.isCounted else { return .gray }
         switch trip.ratio {
-        case ..<0.95: return ("brugte mindre", .green)
-        case ..<1.08: return ("som forudsagt", .green)
-        case ..<1.25: return ("lidt mere", .orange)
-        default: return ("mere end forudsagt", .red)
+        case ..<0.95: return .blue
+        case ..<1.08: return .green
+        case ..<1.25: return .orange
+        default: return .red
+        }
+    }
+
+    private var verdict: String {
+        guard trip.isCounted else { return "For kort til at tælle med – batteriet melder kun hele procent." }
+        let pct = Int(((trip.ratio - 1) * 100).rounded())
+        switch trip.ratio {
+        case ..<0.95: return "Brugte \(-pct) % mindre end forudsagt"
+        case ..<1.08: return "Som forudsagt"
+        default: return "Brugte \(pct) % mere end forudsagt"
         }
     }
 
     var body: some View {
         Card {
-            HStack {
+            HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(trip.startDate.formatted(.dateTime.weekday(.wide).hour().minute()))
-                        .font(.headline)
-                    Text([
-                        String(format: "%.0f km", trip.km),
-                        String(format: "%.0f → %.0f %%", trip.socFrom * 100, trip.socTo * 100),
-                        trip.tempC.map { String(format: "%.0f °C", $0) },
-                        trip.cold == true ? "koldstart" : nil,
-                    ].compactMap { $0 }.joined(separator: " · "))
+                    Text("\(DK.time(trip.startDate))–\(DK.time(trip.endDate))")
+                        .font(.headline).monospacedDigit()
+                    Text("\(trip.minutes) min" + ((trip.joined ?? 1) > 1 ? " · med kort stop" : ""))
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                StatusChip(text: String(format: "×%.2f", trip.ratio), symbol: "gauge.with.dots.needle.50percent", tint: verdict.1)
+                Text("×" + DK.num(trip.ratio, 2))
+                    .font(.subheadline.weight(.bold)).monospacedDigit()
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(tint.opacity(0.15), in: Capsule())
+                    .foregroundStyle(tint)
             }
+
+            HStack(spacing: 14) {
+                stat("road.lanes", "\(DK.num(trip.km, 0)) km")
+                stat("battery.50", "\(DK.num(trip.socFrom * 100, 0))→\(DK.num(trip.socTo * 100, 0)) %")
+                if let t = trip.tempC { stat("thermometer.medium", "\(DK.num(t, 0))°") }
+                if let v = trip.avgKmh { stat("speedometer", "\(DK.num(v, 0)) km/t") }
+            }
+            .font(.caption).foregroundStyle(.secondary)
+
             VStack(spacing: 6) {
-                bar(label: "Faktisk", value: trip.kwhPer100, max: maxValue, color: .primary)
-                bar(label: "Forudsagt", value: trip.predictedPer100, max: maxValue, color: .teal)
+                bar("Brugte", trip.kwhPer100, trip.isCounted ? .primary : .secondary)
+                bar("Maps", trip.predictedPer100, .teal)
             }
-            Text(verdict.0).font(.caption).foregroundStyle(verdict.1)
+            .padding(.top, 2)
+
+            HStack(spacing: 6) {
+                if trip.cold == true { Image(systemName: "snowflake").foregroundStyle(.cyan) }
+                Text(verdict).foregroundStyle(trip.isCounted ? tint : .secondary)
+            }
+            .font(.caption)
         }
+        .opacity(trip.isCounted ? 1 : 0.75)
         .accessibilityElement(children: .combine)
     }
 
-    private var maxValue: Double { max(trip.kwhPer100, trip.predictedPer100, 1) }
+    private func stat(_ symbol: String, _ text: String) -> some View {
+        Label(text, systemImage: symbol).labelStyle(.titleAndIcon).monospacedDigit().lineLimit(1)
+    }
 
-    private func bar(label: String, value: Double, max: Double, color: Color) -> some View {
+    private func bar(_ label: String, _ value: Double, _ color: Color) -> some View {
         HStack(spacing: 8) {
-            Text(label).font(.caption).foregroundStyle(.secondary).frame(width: 70, alignment: .leading)
+            Text(label).font(.caption).foregroundStyle(.secondary).frame(width: 48, alignment: .leading)
             GeometryReader { g in
-                Capsule().fill(color.opacity(0.85))
-                    .frame(width: g.size.width * value / max)
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color(.tertiarySystemFill))
+                    Capsule().fill(color.opacity(0.85))
+                        .frame(width: max(6, g.size.width * min(1, value / max(scale, 1))))
+                }
             }
             .frame(height: 8)
-            Text(String(format: "%.1f", value)).font(.caption.monospacedDigit()).frame(width: 40, alignment: .trailing)
+            Text(DK.num(value)).font(.caption.monospacedDigit()).frame(width: 36, alignment: .trailing)
         }
     }
 }
