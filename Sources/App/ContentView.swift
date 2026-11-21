@@ -63,24 +63,22 @@ struct ContentView: View {
             if let s = live {
                 // Hero: battery ring, range, status chips
                 Card {
-                    HStack(alignment: .center, spacing: 18) {
+                    HStack(alignment: .center, spacing: 20) {
                         BatteryRing(soc: s.stateOfCharge, charging: s.isCharging)
-                        VStack(alignment: .leading, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 4) {
                             if let r = s.rangeKm {
-                                Text("\(Int(r.rounded())) km").font(.title.bold()).monospacedDigit()
-                                Text("rækkevidde (bilens bud)").font(.caption).foregroundStyle(.secondary)
+                                Text("\(Int(r.rounded())) km").font(.system(.title, design: .rounded).bold()).monospacedDigit()
+                                Text("rækkevidde ifølge bilen").font(.caption).foregroundStyle(.secondary)
                             }
-                            Text(ageText(s.measuredAt)).font(.caption).foregroundStyle(.secondary)
+                            Label(ageText(s.measuredAt), systemImage: "clock")
+                                .font(.caption2).foregroundStyle(.tertiary).padding(.top, 6)
                         }
+                        Spacer(minLength: 0)
                     }
-                    .frame(maxWidth: .infinity)
                     chips(for: s)
                 }
                 if s.isCharging { chargingNowCard(s) }
-                if let m = s.model {
-                    consumptionCard(m)
-                    temperatureCard(m)
-                }
+                if let m = s.model { mapsCard(m) }
             } else {
                 Card { Text(liveNote).foregroundStyle(.secondary) }
             }
@@ -159,37 +157,42 @@ struct ContentView: View {
         }
     }
 
-    private func consumptionCard(_ m: ModelHints) -> some View {
-        Card(title: "Forbrug i Maps", symbol: "speedometer") {
-            if let k = m.consumptionKwhPer100 {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(String(format: "%.1f", k)).font(.largeTitle.bold()).monospacedDigit()
-                    Text("kWh/100 km i snit").foregroundStyle(.secondary)
-                }
+    /// Everything Maps is told about consumption, in one card.
+    private func mapsCard(_ m: ModelHints) -> some View {
+        Card(title: "Det regner Maps med", symbol: "map") {
+            HStack(spacing: 0) {
+                tile(m.consumptionKwhPer100.map { DK.num($0) } ?? "–", "kWh/100 km")
+                tile(m.tripCalibration.map { "×" + DK.num($0.factor, 2) } ?? "–", "kalibrering")
+                tile(m.temperatureC.map { DK.num($0, 0) + "°" } ?? "–", "ude")
             }
             if let bins = m.consumptionBinsKwhPer100, bins.count == 10 {
                 SpeedBinsChart(bins: bins, auxW: m.auxPowerW ?? 500)
             }
-            let source = switch m.consumptionSource ?? "" {
-            case "trips": "lært af dine ture"
-            case "learned": "lært"
-            default: "bilens estimat + margen"
-            }
-            KeyValue(key: "Kilde", value: source)
-            if let c = m.tripCalibration {
-                KeyValue(key: "Kalibrering", value: String(format: "×%.2f · %d ture · %.0f km", c.factor, c.n, c.km))
-            }
-            if let a = m.auxPowerW { KeyValue(key: "Varme m.m.", value: String(format: "%.1f kW", a / 1000)) }
+            Text(mapsFootnote(m)).font(.caption).foregroundStyle(.secondary)
         }
     }
 
-    private func temperatureCard(_ m: ModelHints) -> some View {
-        Card(title: "Temperatur", symbol: "thermometer.medium") {
-            if let t = m.temperatureC { KeyValue(key: "Ude", value: String(format: "%.1f °C", t)) }
-            if let x = m.chargePowerScale {
-                KeyValue(key: "Ladeeffekt i kulden", value: String(format: "×%.2f", x))
-            }
+    private func tile(_ value: String, _ label: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(value).font(.system(.title2, design: .rounded).bold()).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
+            Text(label).font(.caption).foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func mapsFootnote(_ m: ModelHints) -> String {
+        var parts: [String] = []
+        switch m.consumptionSource ?? "" {
+        case "trips":
+            if let c = m.tripCalibration { parts.append("Lært af \(c.n) \(c.n == 1 ? "tur" : "ture") (\(DK.num(c.km, 0)) km).") }
+            else { parts.append("Lært af dine ture.") }
+        case "learned": parts.append("Lært af kørslen.")
+        default: parts.append("Bilens estimat plus margen.")
+        }
+        if let a = m.auxPowerW { parts.append("Varme m.m. \(DK.num(a / 1000)) kW.") }
+        if let x = m.chargePowerScale, abs(x - 1) >= 0.01 { parts.append("Ladeeffekt i kulden ×\(DK.num(x, 2)).") }
+        return parts.joined(separator: " ")
     }
 
     private var tripsTab: some View {

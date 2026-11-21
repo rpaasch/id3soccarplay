@@ -61,23 +61,25 @@ struct BatteryRing: View {
 
     var body: some View {
         ZStack {
-            Circle().stroke(color.opacity(0.18), lineWidth: 16)
+            Circle().stroke(color.opacity(0.18), lineWidth: 13)
             Circle()
                 .trim(from: 0, to: max(0.01, min(1, soc)))
-                .stroke(color.gradient, style: StrokeStyle(lineWidth: 16, lineCap: .round))
+                .stroke(color.gradient, style: StrokeStyle(lineWidth: 13, lineCap: .round))
                 .rotationEffect(.degrees(-90))
                 .animation(.easeOut(duration: 0.6), value: soc)
             VStack(spacing: 0) {
                 if charging {
-                    Image(systemName: "bolt.fill").font(.title3).foregroundStyle(.yellow)
+                    Image(systemName: "bolt.fill").font(.callout).foregroundStyle(.yellow)
                 }
-                Text("\(Int((soc * 100).rounded()))")
-                    .font(.system(size: 54, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                Text("%").font(.headline).foregroundStyle(.secondary)
+                HStack(alignment: .firstTextBaseline, spacing: 1) {
+                    Text("\(Int((soc * 100).rounded()))")
+                        .font(.system(size: 44, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                    Text("%").font(.headline).foregroundStyle(.secondary)
+                }
             }
         }
-        .frame(width: 170, height: 170)
+        .frame(width: 128, height: 128)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Batteri \(Int((soc * 100).rounded())) procent\(charging ? ", lader" : "")")
     }
@@ -113,17 +115,24 @@ struct SpeedBinsChart: View {
     }
 
     var body: some View {
-        Chart(bars) { b in
-            BarMark(x: .value("km/t", b.label), y: .value("kWh/100 km", b.kwh))
-                .foregroundStyle(.teal.gradient)
-                .cornerRadius(4)
-                .annotation(position: .top) {
-                    Text("\(Int(b.kwh.rounded()))").font(.caption2).foregroundStyle(.secondary)
-                }
+        VStack(alignment: .leading, spacing: 4) {
+            Text("kWh/100 km ved fart (inkl. varme)").font(.caption2).foregroundStyle(.secondary)
+            Chart(bars) { b in
+                BarMark(x: .value("km/t", b.label), y: .value("kWh/100 km", b.kwh), width: .ratio(0.6))
+                    .foregroundStyle(.teal.gradient)
+                    .cornerRadius(3)
+                    .annotation(position: .top, spacing: 2) {
+                        Text("\(Int(b.kwh.rounded()))").font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                    }
+            }
+            .chartYAxis(.hidden)
+            .chartXAxis {
+                AxisMarks { _ in AxisValueLabel().font(.caption2) }
+            }
+            .frame(height: 110)
+            Text("km/t").font(.caption2).foregroundStyle(.tertiary).frame(maxWidth: .infinity, alignment: .trailing)
         }
-        .chartYAxis(.hidden)
-        .chartXAxisLabel("km/t")
-        .frame(height: 140)
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel("Forbrug efter fart, som Maps regner med")
     }
 }
