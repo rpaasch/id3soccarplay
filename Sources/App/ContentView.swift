@@ -194,6 +194,21 @@ struct ContentView: View {
                 if let p = obd.lastSocPct { row("Batteri (live)", String(format: "%.1f %%", p)) }
                 row("Kontrolleret mod Smartcar", obd.validated ? "ja" : "ikke endnu")
                 if let raw = obd.lastRaw { Text("Rå: \(raw)").font(.caption.monospaced()).foregroundStyle(.secondary) }
+                if let f = obd.firmware { row("Firmware", f) }
+                if let v = obd.volt12 { row("12 V-batteri", v) }
+                if let t = obd.lastAnswer { row("Sidste svar", t.formatted(date: .omitted, time: .standard)) }
+                if obd.okCount + obd.failCount > 0 { row("Svar ok / fejl", "\(obd.okCount) / \(obd.failCount)") }
+                if !obd.extras.isEmpty {
+                    DisclosureGroup("Ekstra batteridata (rå, ikke tolket endnu)") {
+                        ForEach(obd.extras) { x in
+                            Text("\(x.did): \(x.hex)").font(.caption.monospaced())
+                        }
+                    }
+                }
+                Button("Scan batteriets data (1–2 min, bilen tændt)") {
+                    OBDManager.shared.runScan()
+                }
+                if let p = obd.scanProgress { row("Scanning", p) }
                 Button("Kør OBD-test (logger svar)") {
                     OBDManager.shared.runDiagnostics()
                 }

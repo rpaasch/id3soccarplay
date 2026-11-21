@@ -21,6 +21,13 @@
 import Foundation
 import CoreBluetooth
 
+/// One raw battery value (identifier + payload hex) shown in the app until it is interpreted.
+struct OBDExtra: Sendable, Identifiable {
+    let did: String
+    let hex: String
+    var id: String { did }
+}
+
 final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, @unchecked Sendable {
     static let shared = OBDManager()
 
@@ -33,7 +40,20 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         var lastSocPct: Double?
         var validated: Bool
         var scale: Double?
+        // About the dongle
+        var firmware: String?
+        var volt12: String?
+        var lastAnswer: Date?
+        var okCount: Int
+        var failCount: Int
+        // Extra battery values (unverified identifiers: raw bytes for analysis)
+        var extras: [OBDExtra]
+        var scanProgress: String?
     }
+
+    /// Asks the battery controller for ~180 data identifiers once and logs every positive answer,
+    /// so the IDs for battery temperature, voltage, current etc. can be identified from the log.
+    func runScan() { queue.async { self.startScanLocked() } }
 
     func status() -> Status { queue.sync { statusLocked() } }
 
@@ -66,6 +86,8 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     /// Default poll: MEB battery controller over CAN 29-bit, UDS ReadDataByIdentifier 0x028C.
     private static let setup = ["ATZ", "ATE0", "ATL0", "ATS0", "ATH1", "ATSP7", "ATSH17FC007B", "ATCRA17FE007B", "ATST96"]
     private static let pollCommand = "22028C"
+    /// Unverified MEB battery-controller identifiers polled now and then (raw shown in the app).
+    private static let extraDIDs = ["1E3B", "1E3D", "1E0E", "2A0B", "1E33", "1E34", "74CB", "74CC", "F45B", "0B32"]
     private static let pollMarker = "62028C"
     /// Candidate scalings of the single data byte (percent = byte / divisor).
     private static let divisors: [Double] = [2.5, 2.55, 1.0, 2.0]
@@ -102,11 +124,24 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var diagRunning = false
     /// The diagnostic request to send once the pending setup commands are through.
     private var diagNext: (label: String, request: String, index: Int)?
+    private var firmware: String?
+    private var volt12: String?
+    private var lastAnswer: Date?
+    private var okCount = 0
+    private var failCount = 0
+    private var extras: [String: String] = [:]
+    private var tick = 0
+    private var scanQueue: [String] = []
+    private var scanTotal = 0
+    private var scanHits = 0
+    private var scanProgress: String?
     private var lastKeychainWrite = Date.distantPast
 
     private func statusLocked() -> Status {
         Status(state: state, device: peripheral?.name, lastRaw: lastRaw, lastSocPct: lastSocPct,
-               validated: lastValidated, scale: UserDefaults.standard.object(forKey: Self.scaleKey) as? Double)
+               validated: lastValidated, scale: UserDefaults.standard.object(forKey: Self.scaleKey) as? Double,
+               firmware: firmware, volt12: volt12, lastAnswer: lastAnswer, okCount: okCount, failCount: failCount,
+               extras: Self.extraDIDs.compactMap { d in extras[d].map { OBDExtra(did: d, hex: $0) } }, scanProgress: scanProgress)
     }
 
     private func log(_ s: String) { SharedLog.shared.log(s, category: "obd") }
@@ -214,7 +249,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         ready = true
         state = "initialiserer…"
         rxBuffer = ""
-        pending = Self.setup
+        pending = Self.setup + ["ATI", "ATRV"]
         responseHandler = nil
         sendNextLocked()
     }
@@ -226,8 +261,11 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         let reply = rxBuffer.replacingOccurrences(of: ">", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
         rxBuffer = ""
         let handler = responseHandler
+        let cmd = waiting
         responseHandler = nil
         waiting = nil
+        if cmd == "ATI" { firmware = reply }
+        if cmd == "ATRV" { volt12 = reply }
         handler?(reply)
         sendNextLocked()
     }
@@ -255,6 +293,25 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             send(cmd)
             return
         }
+        if !scanQueue.isEmpty {
+            let did = scanQueue.removeFirst()
+            send("22" + did) { reply in
+                let compact = reply.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "\r", with: "")
+                if let r = compact.range(of: "62" + did) {
+                    self.scanHits += 1
+                    self.log("OBD scan \(did): \(compact[r.upperBound...].prefix(40))")
+                }
+                let done = self.scanTotal - self.scanQueue.count
+                self.scanProgress = "\(done)/\(self.scanTotal), \(self.scanHits) svar"
+                if self.scanQueue.isEmpty {
+                    self.diagRunning = false
+                    self.scanProgress = "færdig: \(self.scanHits) svar af \(self.scanTotal) (se loggen)"
+                    self.log("OBD scan done: \(self.scanHits) answers")
+                    self.pending = Self.setup
+                }
+            }
+            return
+        }
         if let d = diagNext {
             diagNext = nil
             send(d.request) { reply in
@@ -269,13 +326,43 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     private func kickLocked() { sendNextLocked() }
 
+    private func startScanLocked() {
+        guard ready else { scanProgress = "donglen er ikke forbundet"; return }
+        var dids: [String] = []
+        for base in [0x1E00, 0x0280, 0x2A00, 0x74C0] {
+            let count = base == 0x1E00 ? 0x50 : 0x20
+            for i in 0..<count { dids.append(String(format: "%04X", base + i)) }
+        }
+        timer?.cancel(); timer = nil
+        diagRunning = true
+        scanQueue = dids
+        scanTotal = dids.count
+        scanHits = 0
+        scanProgress = "starter…"
+        log("OBD scan: \(dids.count) identifiers")
+        pending = ["ATSP7", "ATSH17FC007B", "ATCRA17FE007B", "ATST32"] // shorter timeout while scanning
+        sendNextLocked()
+    }
+
     private func startPollingLocked() {
         state = "læser batteriet"
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now(), repeating: 5)
         t.setEventHandler { [weak self] in
-            guard let self, self.ready, self.waiting == nil, self.pending.isEmpty else { return }
-            self.send(Self.pollCommand) { reply in self.handlePoll(reply) }
+            guard let self, self.ready, self.waiting == nil, self.pending.isEmpty,
+                  !self.diagRunning, self.scanQueue.isEmpty else { return }
+            self.tick += 1
+            if self.tick % 12 == 0 {                    // every ~60 s: the car's 12 V battery
+                self.send("ATRV")
+            } else if self.tick % 3 == 0 {              // every ~15 s: one extra battery value, in turn
+                let did = Self.extraDIDs[(self.tick / 3) % Self.extraDIDs.count]
+                self.send("22" + did) { reply in
+                    let c = reply.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "\r", with: "")
+                    if let r = c.range(of: "62" + did) { self.extras[did] = String(c[r.upperBound...].prefix(16)) }
+                }
+            } else {
+                self.send(Self.pollCommand) { reply in self.handlePoll(reply) }
+            }
         }
         t.resume()
         timer = t
@@ -304,11 +391,14 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         let compact = reply.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "\r", with: "")
         lastRaw = String(compact.prefix(40))
         guard let r = compact.range(of: Self.pollMarker) else {
+            failCount += 1
             state = "intet svar fra batteriet (\(compact.prefix(16)))"
             return
         }
         let hex = compact[r.upperBound...].prefix(2)
-        guard hex.count == 2, let byte = UInt8(hex, radix: 16) else { return }
+        guard hex.count == 2, let byte = UInt8(hex, radix: 16) else { failCount += 1; return }
+        okCount += 1
+        lastAnswer = Date()
         let scale = chooseScale(byte: Double(byte))
         guard let scale else {
             state = String(format: "læser rå værdi %d (afventer sammenligning med Smartcar)", byte)
