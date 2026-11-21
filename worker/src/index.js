@@ -1021,9 +1021,25 @@ async function gpsEndpoint(request, env) {
 }
 
 // actual/predicted for trips near this temperature (+-4 C), else over all trips; >= 40 km needed.
+// Trips split by a short stop (CarPlay off/on, < 10 min) are joined for calibration: the SoC at
+// the split is VW's (late, whole-percent) value, so the energy is misattributed between the parts
+// (21 Nov: x1.88 then x0.55, together x1.28).
+function joinShortStops(trips) {
+  const out = [];
+  for (const t of trips || []) {
+    const p = out[out.length - 1];
+    if (p && typeof t.start === "number" && typeof p.end === "number" && t.start - p.end <= 10 * 60e3 && t.start >= p.end - 60e3) {
+      const km = p.km + t.km, kwh = p.kwh + t.kwh, predictedKwh = (p.predictedKwh || 0) + (t.predictedKwh || 0);
+      const tempC = typeof p.tempC === "number" && typeof t.tempC === "number" ? (p.tempC * p.km + t.tempC * t.km) / km : (p.tempC ?? t.tempC);
+      out[out.length - 1] = { ...p, end: t.end, km, kwh, predictedKwh, tempC, socTo: t.socTo, ratio: predictedKwh > 0 ? kwh / predictedKwh : p.ratio, joined: (p.joined || 1) + 1 };
+    } else out.push(t);
+  }
+  return out;
+}
+
 function tripCalibration(trips, tempC) {
   // >= 20 km: SoC is reported in whole percent, so a 10 km trip (3 pp) is +-33 % uncertain.
-  const ok = (trips || []).filter((x) => x.km >= 20 && x.predictedKwh > 0 && x.ratio > 0.5 && x.ratio < 2.5);
+  const ok = joinShortStops(trips).filter((x) => x.km >= 20 && x.predictedKwh > 0 && x.ratio > 0.5 && x.ratio < 2.5);
   const pick = (arr) => {
     const a = arr.slice(-10);
     const km = a.reduce((s, x) => s + x.km, 0);
