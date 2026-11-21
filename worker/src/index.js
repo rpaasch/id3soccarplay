@@ -821,9 +821,20 @@ function physicsParts(tempC) {
 }
 const speedBin = (kmh) => Math.max(0, Math.min(9, Math.floor(kmh / 20)));
 
-function predictTripKwh(binKm, hours, tempC) {
+// Cold start: after >= 1 h parked the cabin (and battery) are warmed up during the first ~15 min,
+// on top of the steady heating. ~100 W per degree below 15 C, 0.5-2.5 kW.
+const COLD_PARK_H = 1;
+const WARMUP_H = 0.25;
+function coldBoostKw(tempC) {
+  const T = typeof tempC === "number" ? tempC : 8;
+  return Math.min(2.5, Math.max(0.5, 0.1 * (15 - T)));
+}
+const isColdStart = (parkedH) => parkedH == null || parkedH >= COLD_PARK_H;
+
+function predictTripKwh(binKm, hours, tempC, coldStart) {
   const p = physicsParts(tempC);
-  return binKm.reduce((a, km, i) => a + (km * p.trac[i] * p.kt) / 100, 0) + p.auxKw * hours;
+  return binKm.reduce((a, km, i) => a + (km * p.trac[i] * p.kt) / 100, 0) + p.auxKw * hours
+    + (coldStart ? coldBoostKw(tempC) * Math.min(hours, WARMUP_H) : 0);
 }
 
 // The car reports nothing while asleep, so a trip's start is found by walking back from the first
@@ -916,13 +927,14 @@ async function finishTrip(env, trip, end) {
   if (!(hours > 0.05)) hours = km / 60;
   const tempC = trip.tempN ? trip.tempSum / trip.tempN : null;
   const kwh = dSoc * (await netCapacityKwh(env));
-  const predicted = predictTripKwh(binKm, hours, tempC);
+  const coldStart = isColdStart(trip.parkedH);
+  const predicted = predictTripKwh(binKm, hours, tempC, coldStart);
   const rec = {
     start: trip.start.t, end: end.t, km: r1(km), socFrom: trip.start.soc, socTo: end.soc,
     kwh: r1(kwh), kwhPer100: r1((kwh / km) * 100), tempC: tempC == null ? null : r1(tempC),
     avgKmh: Math.round(km / hours), binKm: binKm.map(r1),
     predictedKwh: r1(predicted), predictedPer100: r1((predicted / km) * 100), ratio: Math.round((kwh / predicted) * 100) / 100,
-    cold: trip.parkedH != null && trip.parkedH >= 3, parkedH: trip.parkedH,
+    cold: coldStart, parkedH: trip.parkedH,
   };
   applyGps(rec, await env.STATE.get("gps_segments", "json"));
   const trips = (await env.STATE.get("trips", "json")) || [];
@@ -957,7 +969,8 @@ function applyGps(rec, segs) {
   const hours = g.binSec.reduce((a, b) => a + b, 0) / 3600;
   const p = physicsParts(rec.tempC);
   const elevKwh = (g.gainM * ALT_GAIN_WH_PER_M - g.lossM * ALT_LOSS_WH_PER_M) / 1000;
-  const predicted = binKm.reduce((a, km, i) => a + (km * p.trac[i] * p.kt) / 100, 0) + p.auxKw * hours + elevKwh;
+  const predicted = binKm.reduce((a, km, i) => a + (km * p.trac[i] * p.kt) / 100, 0) + p.auxKw * hours + elevKwh
+    + (rec.cold ? coldBoostKw(rec.tempC) * Math.min(hours, WARMUP_H) : 0);
   if (!(predicted > 0)) return false;
   Object.assign(rec, {
     source: "gps", binKm: binKm.map(r1), gainM: Math.round(g.gainM), lossM: Math.round(g.lossM),
@@ -1247,7 +1260,7 @@ async function outdoorTemp(env, ctx) {
 
 async function buildModel(env, snap, ctx) {
   // Independent reads run in parallel: sequential cold KV reads were what made /status slow.
-  const [grossRaw, ti, estPrev, trimCarRaw, trimLearnedRaw, recentDrive, shapeMode, trips] = await Promise.all([
+  const [grossRaw, ti, estPrev, trimCarRaw, trimLearnedRaw, recentDrive, shapeMode, trips, openTrip] = await Promise.all([
     kvTextCached(env, "sc_capacity", 300),
     outdoorTempInfo(env, ctx),
     kvJsonCached(env, "cons_estimate"),
@@ -1256,6 +1269,7 @@ async function buildModel(env, snap, ctx) {
     env.STATE.get("recent_drive", "json"),
     env.STATE.get("consumption_shape_mode"),
     kvJsonCached(env, "trips"),
+    env.STATE.get("trip_current", "json"),
   ]);
   const warm = !!(recentDrive && Date.now() - recentDrive.at < 45 * 60 * 1000);
   const net = Math.round((Number(grossRaw) || 82) * 0.94);
@@ -1320,6 +1334,25 @@ async function buildModel(env, snap, ctx) {
   }
   if (cc) { model.chargeCurveKw = cc.curveKw; model.chargeSessions = cc.sessions; model.chargeCurveWarm = !!cc.warm; }
   model.batteryWarm = warm;
+  // Cold start: extra heating power while the car warms up. Applies when planning from a car
+  // that has been parked >= 1 h, and during the first 15 min of a trip that started cold. Maps
+  // applies it to the whole route; the extension's next push removes it once warmed up.
+  if (model.auxPowerW) {
+    const now = Date.now();
+    const parkedH = recentDrive ? (now - recentDrive.at) / 3600000 : null;
+    const cold = openTrip
+      ? isColdStart(openTrip.parkedH) && now - openTrip.start.t < WARMUP_H * 3600000
+      : isColdStart(parkedH);
+    if (cold) {
+      const boostW = Math.round(coldBoostKw(t) * 1000);
+      model.auxPowerW += boostW;
+      model.coldStartBoostW = boostW;
+      // Reflect it in the mean so the extension sees a model change and re-pushes when it ends.
+      const sumMix = BIN_MIX.reduce((a, b) => a + b, 0);
+      const perKw = BIN_MIX.reduce((a, m, i) => a + m * (100 / BIN_KMH[i]), 0) / sumMix;
+      model.consumptionKwhPer100 = r1(model.consumptionKwhPer100 + (boostW / 1000) * perKw);
+    }
+  }
   return model;
 }
 
