@@ -57,10 +57,10 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private static let scaleKey = "obdScale"
     private static let restoreId = "id3maps.obd"
     /// GATT services used by Vgate / vLinker / generic BLE ELM327 dongles.
-    private static let serviceUUIDs = [
+    private static var serviceUUIDs: [CBUUID] { [
         CBUUID(string: "E7810A71-73AE-499D-8C15-FAA9AEF0C3F2"),
         CBUUID(string: "FFF0"), CBUUID(string: "FFE0"), CBUUID(string: "18F0"),
-    ]
+    ] }
     private static let nameHints = ["icar", "vgate", "vlink", "obd", "v-link", "ios-vlink", "elm"]
 
     /// Default poll: MEB battery controller over CAN 29-bit, UDS ReadDataByIdentifier 0x028C.
@@ -100,6 +100,8 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var lastValidated = false
     private var diagnosticsPending = false
     private var diagRunning = false
+    /// The diagnostic request to send once the pending setup commands are through.
+    private var diagNext: (label: String, request: String, index: Int)?
     private var lastKeychainWrite = Date.distantPast
 
     private func statusLocked() -> Status {
@@ -253,6 +255,14 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             send(cmd)
             return
         }
+        if let d = diagNext {
+            diagNext = nil
+            send(d.request) { reply in
+                self.log("OBD test \(d.label): \(reply.replacingOccurrences(of: "\r", with: " | "))")
+                self.queue.async { self.runCandidatesLocked(index: d.index + 1) }
+            }
+            return
+        }
         if diagnosticsPending { diagnosticsPending = false; runCandidatesLocked(index: 0); return }
         if timer == nil && !diagRunning { startPollingLocked() }
     }
@@ -282,17 +292,10 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         }
         timer?.cancel(); timer = nil
         let (label, setupCmds, request) = Self.candidates[index]
+        // Setup commands first; sendNextLocked sends the request (and logs it) once they are through.
         pending = setupCmds
-        // After the setup commands, send the request and log the raw answer.
-        func afterSetup() {
-            if !pending.isEmpty || waiting != nil { queue.asyncAfter(deadline: .now() + 0.3) { afterSetup() }; return }
-            send(request) { reply in
-                self.log("OBD test \(label): \(reply.replacingOccurrences(of: "\r", with: " | "))")
-                self.queue.async { self.runCandidatesLocked(index: index + 1) }
-            }
-        }
+        diagNext = (label, request, index)
         sendNextLocked()
-        queue.asyncAfter(deadline: .now() + 0.3) { afterSetup() }
     }
 
     // MARK: Parsing + validation
