@@ -167,10 +167,10 @@ struct TripCard: View {
 
     private var tint: Color {
         guard trip.isCounted else { return .gray }
-        switch trip.ratio {
-        case ..<0.95: return .blue
+        switch trip.vsMaps {
+        case ..<0.92: return .blue
         case ..<1.08: return .green
-        case ..<1.25: return .orange
+        case ..<1.2: return .orange
         default: return .red
         }
     }
@@ -181,11 +181,11 @@ struct TripCard: View {
                 ? "For kort til at tælle med – batteriet melder kun hele procent."
                 : "Tæller ikke med – forbruget ligger så langt fra det forventede, at målingen nok er forkert."
         }
-        let pct = Int(((trip.ratio - 1) * 100).rounded())
-        switch trip.ratio {
-        case ..<0.95: return "Brugte \(-pct) % mindre end forudsagt"
-        case ..<1.08: return "Som forudsagt"
-        default: return "Brugte \(pct) % mere end forudsagt"
+        let pct = Int(((trip.vsMaps - 1) * 100).rounded())
+        switch trip.vsMaps {
+        case ..<0.95: return "Brugte \(-pct) % mindre end Maps regnede med"
+        case ..<1.05: return "Som Maps regnede med"
+        default: return "Brugte \(pct) % mere end Maps regnede med"
         }
     }
 
@@ -199,7 +199,7 @@ struct TripCard: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text("×" + DK.num(trip.ratio, 2))
+                Text((trip.vsMaps >= 1 ? "+" : "−") + DK.num(abs(trip.vsMaps - 1) * 100, 0) + " %")
                     .font(.subheadline.weight(.bold)).monospacedDigit()
                     .padding(.horizontal, 10).padding(.vertical, 5)
                     .background(tint.opacity(0.15), in: Capsule())
@@ -217,7 +217,7 @@ struct TripCard: View {
 
             VStack(spacing: 6) {
                 bar("Brugte", trip.kwhPer100, trip.isCounted ? .primary : .secondary)
-                bar("Maps", trip.predictedPer100, .teal)
+                bar("Maps", trip.mapsValue, .teal)
             }
             .padding(.top, 2)
 

@@ -229,12 +229,12 @@ struct ContentView: View {
                     }
                 }
                 let shown = Array(trips.prefix(20))
-                let scale = (shown.flatMap { [$0.kwhPer100, $0.predictedPer100] }.max() ?? 30) * 1.05
+                let scale = (shown.flatMap { [$0.kwhPer100, $0.mapsValue] }.max() ?? 30) * 1.05
                 ForEach(groupedByDay(shown)) { group in
                     Text(group.day).font(.title3.bold()).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
                     ForEach(group.trips) { TripCard(trip: $0, scale: scale) }
                 }
-                Text("Brugte = kWh pr. 100 km ud fra batteriets fald. Maps = hvad modellen forudsagde for samme fart og temperatur. Ture under 20 km tæller ikke med, fordi batteriet melder i hele procent.")
+                Text("Brugte = kWh pr. 100 km ud fra batteriets fald. Maps = det forbrug, Maps fik for samme fart og temperatur, med den kalibrering der gjaldt da. Ture under 20 km tæller ikke med, fordi batteriet melder i hele procent.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
         }

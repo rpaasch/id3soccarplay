@@ -27,12 +27,19 @@ struct Trip: Decodable, Identifiable, Sendable {
     let joined: Int?
     /// Used for the calibration (>= 20 km and a plausible ratio).
     let counted: Bool?
+    /// What Maps was actually given (prediction x the calibration in force then).
+    let mapsPer100: Double?
+    let mapsRatio: Double?
+    let mapsFactor: Double?
 
     var id: Double { start }
     var startDate: Date { Date(timeIntervalSince1970: start / 1000) }
     var endDate: Date { Date(timeIntervalSince1970: end / 1000) }
     var minutes: Int { max(1, Int(((end - start) / 60000).rounded())) }
     var isCounted: Bool { counted ?? (km >= 20) }
+    var mapsValue: Double { mapsPer100 ?? predictedPer100 }
+    /// Used vs what Maps was given.
+    var vsMaps: Double { mapsRatio ?? ratio }
 }
 
 struct TripCalibration: Codable, Sendable {
