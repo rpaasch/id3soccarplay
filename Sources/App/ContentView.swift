@@ -158,18 +158,24 @@ struct ContentView: View {
         }
     }
 
-    /// Everything Maps is told about consumption, in one card.
+    /// What Maps is told about consumption, in one card: per speed, then why.
     private func mapsCard(_ m: ModelHints) -> some View {
         Card(title: "Det regner Maps med", symbol: "map") {
-            HStack(spacing: 0) {
-                tile(m.consumptionKwhPer100.map { DK.num($0) } ?? "–", "kWh/100 km")
-                tile(m.tripCalibration.map { "×" + DK.num($0.factor, 2) } ?? "–", "kalibrering")
-                tile(m.temperatureC.map { DK.num($0, 0) + "°" } ?? "–", "ude")
-            }
+            let aux = m.auxPowerW ?? 500
             if let bins = m.consumptionBinsKwhPer100, bins.count == 10 {
-                SpeedBinsChart(bins: bins, auxW: m.auxPowerW ?? 500)
+                Text("Strømforbrug pr. 100 km" + (m.temperatureC.map { " ved \(DK.num($0, 0)) °C ude" } ?? "") + ", varme medregnet:")
+                    .font(.callout).foregroundStyle(.secondary)
+                HStack(spacing: 0) {
+                    tile(DK.num(SpeedBinsChart.value(bins: bins, auxW: aux, index: 2), 0) + " kWh", "by, 50 km/t")
+                    tile(DK.num(SpeedBinsChart.value(bins: bins, auxW: aux, index: 4), 0) + " kWh", "landevej, 90")
+                    tile(DK.num(SpeedBinsChart.value(bins: bins, auxW: aux, index: 6), 0) + " kWh", "motorvej, 130")
+                }
+                SpeedBinsChart(bins: bins, auxW: aux)
+            } else if let k = m.consumptionKwhPer100 {
+                tile(DK.num(k) + " kWh", "pr. 100 km i snit")
             }
             Text(mapsFootnote(m)).font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -184,15 +190,19 @@ struct ContentView: View {
 
     private func mapsFootnote(_ m: ModelHints) -> String {
         var parts: [String] = []
-        switch m.consumptionSource ?? "" {
-        case "trips":
-            if let c = m.tripCalibration { parts.append("Lært af \(c.n) \(c.n == 1 ? "tur" : "ture") (\(DK.num(c.km, 0)) km).") }
-            else { parts.append("Lært af dine ture.") }
-        case "learned": parts.append("Lært af kørslen.")
-        default: parts.append("Bilens estimat plus margen.")
+        if let a = m.auxPowerW {
+            parts.append("Varmen bruger \(DK.num(a / 1000)) kW hele tiden, så ved lav fart koster den mest pr. km.")
         }
-        if let a = m.auxPowerW { parts.append("Varme m.m. \(DK.num(a / 1000)) kW.") }
-        if let x = m.chargePowerScale, abs(x - 1) >= 0.01 { parts.append("Ladeeffekt i kulden ×\(DK.num(x, 2)).") }
+        if let c = m.tripCalibration {
+            let pct = Int(((c.factor - 1) * 100).rounded())
+            if pct > 0 {
+                parts.append("Tallene er \(pct) % højere end den rene beregning, fordi dine sidste \(c.n) ture (\(DK.num(c.km, 0)) km) viste, at bilen bruger så meget mere i virkeligheden.")
+            } else if pct < 0 {
+                parts.append("Tallene er \(-pct) % lavere end den rene beregning, fordi dine sidste \(c.n) ture (\(DK.num(c.km, 0)) km) viste, at bilen bruger mindre i virkeligheden.")
+            }
+        } else if m.consumptionSource != "trips" {
+            parts.append("Bygger på bilens eget estimat plus en sikkerhedsmargen, indtil du har kørt et par længere ture.")
+        }
         return parts.joined(separator: " ")
     }
 

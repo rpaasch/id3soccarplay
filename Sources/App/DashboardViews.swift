@@ -108,16 +108,22 @@ struct SpeedBinsChart: View {
 
     private struct Bar: Identifiable { let id: Int; let label: String; let kwh: Double }
 
+    static let mids = [10.0, 30, 50, 70, 90, 110, 130, 150]
+
+    /// kWh/100 km at speed bin `i` including heating (aux power spread over the km driven).
+    static func value(bins: [Double], auxW: Double, index i: Int) -> Double {
+        bins[i] + auxW / 1000 / mids[i] * 100
+    }
+
     private var bars: [Bar] {
-        let mids = [10.0, 30, 50, 70, 90, 110, 130, 150]
-        return mids.enumerated().map { i, v in
-            Bar(id: i, label: "\(Int(v))", kwh: bins[i] + auxW / 1000 / v * 100)
+        Self.mids.indices.map { i in
+            Bar(id: i, label: "\(Int(Self.mids[i]))", kwh: Self.value(bins: bins, auxW: auxW, index: i))
         }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("kWh/100 km ved fart (inkl. varme)").font(.caption2).foregroundStyle(.secondary)
+            Text("kWh pr. 100 km ved hver fart").font(.caption2).foregroundStyle(.secondary)
             Chart(bars) { b in
                 BarMark(x: .value("km/t", b.label), y: .value("kWh/100 km", b.kwh), width: .ratio(0.6))
                     .foregroundStyle(.teal.gradient)
