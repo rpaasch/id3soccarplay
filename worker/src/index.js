@@ -776,7 +776,19 @@ async function learnedChargeCurve(env, tempC, warm) {
   };
   // A recently driven (warm) battery uses its own curve when there is one, else the cold curve (the safe side).
   if (warm) { const w = curveOf(await kvJsonCached(env, `${base}_w`)); if (w) return { ...w, warm: true }; }
-  return curveOf(await kvJsonCached(env, base));
+  const own = curveOf(await kvJsonCached(env, base));
+  if (own) return own;
+  // Nothing learned in this 5 C band: borrow the nearest band (+-5, then +-10 C) rather than fall
+  // back to the generic curve. Same warm/cold preference.
+  const band = Number(tempBand(tempC));
+  if (!isFinite(band)) return null;
+  for (const d of [5, -5, 10, -10]) {
+    const nb = `learn_charge_${band + d}`;
+    if (warm) { const w = curveOf(await kvJsonCached(env, `${nb}_w`)); if (w) return { ...w, warm: true, borrowedBand: band + d }; }
+    const c = curveOf(await kvJsonCached(env, nb));
+    if (c) return { ...c, borrowedBand: band + d };
+  }
+  return null;
 }
 
 async function cronTick(env) {
@@ -1332,7 +1344,10 @@ async function buildModel(env, snap, ctx) {
     const shape = consumptionShape(mode, bySpeed);
     if (shape) { model.consumptionShape = shape; model.consumptionShapeMode = mode; }
   }
-  if (cc) { model.chargeCurveKw = cc.curveKw; model.chargeSessions = cc.sessions; model.chargeCurveWarm = !!cc.warm; }
+  if (cc) {
+    model.chargeCurveKw = cc.curveKw; model.chargeSessions = cc.sessions; model.chargeCurveWarm = !!cc.warm;
+    if (cc.borrowedBand != null) model.chargeCurveBand = cc.borrowedBand;
+  }
   model.batteryWarm = warm;
   // Cold start: extra heating power while the car warms up. Applies when planning from a car
   // that has been parked >= 1 h, and during the first 15 min of a trip that started cold. Maps
