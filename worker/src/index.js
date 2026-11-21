@@ -555,7 +555,7 @@ async function learn(env, snap) {
       const rd = await env.STATE.get("recent_drive", "json");
       if (!rd || snap.measuredAt - rd.at > 5 * 60 * 1000) await kvPut(env, "recent_drive", JSON.stringify({ at: snap.measuredAt }));
     }
-    await trackTrip(env, snap, prevEntry, t);
+    await trackTrip(env, snap, prevEntry, t, log);
     await learnConsumption(env, snap, t);
     await learnCharging(env, snap, t, log);
   } catch (e) {
@@ -779,6 +779,9 @@ async function learnedChargeCurve(env, tempC, warm) {
 }
 
 async function cronTick(env) {
+  // A trip ends 30 min after the last movement even if the sleeping car sends nothing more.
+  const open = await env.STATE.get("trip_current", "json");
+  if (open && Date.now() - open.lastMoveT >= TRIP_END_IDLE_MS + 60 * 1000) await finishTrip(env, open, open.lastDriving);
   const snap = await env.STATE.get("snapshot", "json");
   if (!snap || snap.charging !== true) return;
   const lastPoll = Number((await env.STATE.get("last_poll_at")) || 0);
@@ -821,14 +824,36 @@ function predictTripKwh(binKm, hours, tempC) {
   return binKm.reduce((a, km, i) => a + (km * p.trac[i] * p.kt) / 100, 0) + p.auxKw * hours;
 }
 
-async function trackTrip(env, snap, prevEntry, tempC) {
+// The car reports nothing while asleep, so a trip's start is found by walking back from the first
+// odometer change through the measurements just before it while SoC was already falling (VW
+// updates SoC every 2-3 min but the odometer only every ~20 min). A gap of more than 30 min, a
+// charge or the previous trip's end stops the walk.
+function tripStartFrom(log, prevEntry, afterT) {
+  const entries = (log || []).slice(0, -1).filter((e) => typeof e.odo === "number" && e.t > afterT && e.t <= prevEntry.t);
+  let start = prevEntry;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e.t >= start.t) continue;
+    if (start.t - e.t > TRIP_END_IDLE_MS || e.ch === true || e.soc <= start.soc || e.odo !== prevEntry.odo) break; // only while SoC was really falling
+    start = e;
+  }
+  return { t: start.t, soc: start.soc, odo: start.odo };
+}
+
+async function trackTrip(env, snap, prevEntry, tempC, log) {
   if (typeof snap.odometerKm !== "number") return;
   let trip = await env.STATE.get("trip_current", "json");
   const now = { t: snap.measuredAt, soc: snap.soc, odo: snap.odometerKm };
+  // First close a trip whose last movement is long ago: the car slept in between, and this
+  // measurement belongs to whatever happens next, not to the old trip.
+  if (trip && now.t - trip.lastMoveT >= TRIP_END_IDLE_MS) {
+    await finishTrip(env, trip, trip.lastDriving);
+    trip = null;
+  }
   if (!trip) {
     if (snap.charging === true || !prevEntry || typeof prevEntry.odo !== "number" || now.odo - prevEntry.odo < 0.5) return;
     const lastEnd = await env.STATE.get("trip_last_end", "json");
-    const start = { t: prevEntry.t, soc: prevEntry.soc, odo: prevEntry.odo };
+    const start = tripStartFrom(log, prevEntry, lastEnd ? lastEnd.t : 0);
     trip = { start, last: start, lastMoveT: start.t, lastOdoT: start.t, lastDriving: start, binKm: Array(10).fill(0), unbinnedKm: 0,
       driveMs: 0, tempSum: 0, tempN: 0, parkedH: lastEnd ? r1((start.t - lastEnd.t) / 3600000) : null };
   }
@@ -837,7 +862,6 @@ async function trackTrip(env, snap, prevEntry, tempC) {
   const dKm = now.odo - trip.last.odo, dt = now.t - trip.last.t;
   if (snap.charging === true) return finishTrip(env, trip, trip.lastDriving); // charging ends the trip
   if (dKm > 0 || now.soc < trip.last.soc - 0.005) trip.lastMoveT = now.t; // odometer or SoC still moving
-  if (dKm <= 0 && now.t - trip.lastMoveT >= TRIP_END_IDLE_MS) return finishTrip(env, trip, trip.lastDriving); // parked
   if (dKm > 0) {
     // Speed = km since the previous odometer CHANGE / time since then (SoC reports in between
     // carry the same odometer value and must not shrink the window).
@@ -964,7 +988,8 @@ async function gpsEndpoint(request, env) {
 
 // actual/predicted for trips near this temperature (+-4 C), else over all trips; >= 40 km needed.
 function tripCalibration(trips, tempC) {
-  const ok = (trips || []).filter((x) => x.km >= 10 && x.predictedKwh > 0 && x.ratio > 0.5 && x.ratio < 2.5);
+  // >= 20 km: SoC is reported in whole percent, so a 10 km trip (3 pp) is +-33 % uncertain.
+  const ok = (trips || []).filter((x) => x.km >= 20 && x.predictedKwh > 0 && x.ratio > 0.5 && x.ratio < 2.5);
   const pick = (arr) => {
     const a = arr.slice(-10);
     const km = a.reduce((s, x) => s + x.km, 0);
