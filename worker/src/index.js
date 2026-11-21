@@ -1408,6 +1408,9 @@ async function statusEndpoint(request, env, ctx) {
     if (sess) {
       chargeSession = { startedAt: sess.startedAt, warm: !!sess.warm,
         samples: (sess.samples || []).filter((x) => typeof x.kw === "number").slice(-120).map((x) => ({ t: x.t, soc: x.soc, kw: x.kw })) };
+      // Webhook snapshots carry no power: show the latest session sample instead of nothing.
+      const last = chargeSession.samples[chargeSession.samples.length - 1];
+      if (typeof snap.wattageW !== "number" && last) snap = { ...snap, wattageW: Math.round(last.kw * 1000) };
     }
   }
   return new Response(JSON.stringify({ available: true, ageSeconds: ageSec, lastError, kvWriteError, model, chargeSession, ...snap }),
