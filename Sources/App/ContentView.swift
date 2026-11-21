@@ -27,6 +27,8 @@ struct ContentView: View {
     @State private var tripsNote = ""
     @State private var gpsOn = GPSRecorder.shared.enabled
     @State private var gpsNote = ""
+    @State private var obdOn = OBDManager.shared.enabled
+    @State private var obd = OBDManager.shared.status()
 
     var body: some View {
         NavigationStack {
@@ -35,6 +37,7 @@ struct ContentView: View {
                 chargeCurveSection
                 tripsSection
                 gpsSection
+                obdSection
                 connectionSection
                 actionSection
                 logSection
@@ -178,6 +181,29 @@ struct ContentView: View {
         }
     }
 
+    private var obdSection: some View {
+        Section("OBD-dongle (live batteriprocent)") {
+            Toggle("Brug OBD-dongle", isOn: $obdOn)
+                .onChange(of: obdOn) { _, on in
+                    OBDManager.shared.enabled = on
+                    obd = OBDManager.shared.status()
+                }
+            if obdOn {
+                row("Status", obd.state)
+                if let d = obd.device { row("Dongle", d) }
+                if let p = obd.lastSocPct { row("Batteri (live)", String(format: "%.1f %%", p)) }
+                row("Kontrolleret mod Smartcar", obd.validated ? "ja" : "ikke endnu")
+                if let raw = obd.lastRaw { Text("Rå: \(raw)").font(.caption.monospaced()).foregroundStyle(.secondary) }
+                Button("Kør OBD-test (logger svar)") {
+                    OBDManager.shared.runDiagnostics()
+                }
+                Button("Opdater OBD-status") { obd = OBDManager.shared.status() }
+            }
+            Text("Tænd bilen og luk andre apps, der bruger donglen (BimmerCode, Car Scanner o.l.). Live-tallet bruges kun i Maps, når det passer med Smartcar (højst 4 procentpoint forskel).")
+                .font(.footnote).foregroundStyle(.secondary)
+        }
+    }
+
     private func refreshGPSNote() {
         gpsNote = GPSRecorder.shared.lastUploadNote
     }
@@ -264,6 +290,7 @@ struct ContentView: View {
             if let r = try? await TripsClient.fetch() { trips = r.trips; tripsNote = "" } else { tripsNote = "Kunne ikke hente turene." }
             await GPSRecorder.shared.flushQueue()
             refreshGPSNote()
+            obd = OBDManager.shared.status()
             if Date().timeIntervalSince(s.measuredAt) > 1800 && !s.isCharging {
                 liveNote += " Tidspunktet er, hvornår bilen sidst meldte til VW. Det er normalt, når den holder parkeret."
             }

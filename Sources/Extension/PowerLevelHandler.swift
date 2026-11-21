@@ -128,11 +128,13 @@ private final class UpdateCoordinator: @unchecked Sendable {
 
     private func run(generation: Int) async {
         var lastPushed: VehicleState?
+        var obdLive = false
         while !Task.isCancelled {
             guard currentObserver(for: generation) != nil else { return } // superseded or stopped
             if let profile = try? VehicleProfile.load(),
                let current = await StateProvider.current(timeout: 6, background: true) {
                 let s = current.state
+                obdLive = current.origin == .obd
                 if PowerLevelHandler.shouldPush(new: s, last: lastPushed),
                    let target = currentObserver(for: generation) {
                     let adjusted = profile.adjusted(with: s.model)
@@ -144,7 +146,8 @@ private final class UpdateCoordinator: @unchecked Sendable {
                     )
                 }
             }
-            try? await Task.sleep(for: .seconds(60))
+            // With the OBD dongle live the SoC is seconds old: check often so Maps follows the car.
+            try? await Task.sleep(for: .seconds(obdLive ? 15 : 60))
         }
     }
 }
