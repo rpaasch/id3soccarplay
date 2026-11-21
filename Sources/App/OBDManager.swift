@@ -453,10 +453,11 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         return Calibration(slope: 1 / 0.9, intercept: -5 / 0.9, pairs: 0)
     }
 
-    /// Learns from a fresh Smartcar value (< 2 min old, not yet used). Returns the latest residual.
+    /// Learns from a recent Smartcar value (< 10 min old, not yet used). Returns the latest residual.
+    /// (VW's values reach us 1-5 min after the car measured them, so 2 min was too strict.)
     private func learnPair(bms: Double) -> Double? {
         guard let cloud: VehicleState = SharedStore.codable(.lastState),
-              Date().timeIntervalSince(cloud.measuredAt) < 120 else { return nil }
+              Date().timeIntervalSince(cloud.measuredAt) < 600 else { return nil }
         var pairs = (UserDefaults.standard.array(forKey: Self.pairsKey) as? [[Double]]) ?? []
         let t = cloud.measuredAt.timeIntervalSince1970
         if pairs.last?[2] != t {
@@ -503,8 +504,13 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         let cal = calibration()
         let pct = min(100, max(0, cal.slope * bms + cal.intercept))
         lastSocPct = pct
-        // Only for Maps once at least one real comparison exists and it agrees within 2 pp.
-        lastValidated = cal.pairs > 0 && abs(lastResidual ?? 99) <= 2
+        // For Maps: trusted from the first second once >= 3 comparisons agreed; a fresh comparison
+        // that is off by more than 3 pp suspends it until the calibration has caught up.
+        if let r = lastResidual {
+            lastValidated = cal.pairs >= 3 ? abs(r) <= 3 : abs(r) <= 2
+        } else {
+            lastValidated = cal.pairs >= 3
+        }
         state = String(format: "live: %.1f %%", pct) + (lastValidated ? "" : " (afventer sammenligning med Smartcar)")
         let reading = OBDReading(soc: pct / 100, at: Date(), validated: lastValidated)
         // Keychain write at most every 10 s, or immediately on a whole-percent change.
