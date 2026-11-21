@@ -202,16 +202,19 @@ struct ContentView: View {
             } else {
                 if let c = live?.model?.tripCalibration {
                     Card(title: "Kalibrering", symbol: "dial.medium") {
-                        HStack(alignment: .firstTextBaseline, spacing: 10) {
-                            Text("×" + DK.num(c.factor, 2)).font(.system(size: 44, weight: .bold, design: .rounded)).monospacedDigit()
-                            VStack(alignment: .leading, spacing: 2) {
-                                let pct = Int(((c.factor - 1) * 100).rounded())
-                                Text(pct >= 0 ? "\(pct) % mere end ren fysik" : "\(-pct) % mindre end ren fysik").font(.callout.weight(.semibold))
-                                Text("Maps får forbruget ganget med dette tal.").font(.caption).foregroundStyle(.secondary)
-                            }
+                        let pct = Int(((c.factor - 1) * 100).rounded())
+                        HStack(alignment: .center) {
+                            Text("×" + DK.num(c.factor, 2))
+                                .font(.system(size: 34, weight: .bold, design: .rounded)).monospacedDigit()
+                            Spacer()
+                            Text("\(c.n) \(c.n == 1 ? "tur" : "ture") · \(DK.num(c.km, 0)) km")
+                                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                                .padding(.horizontal, 10).padding(.vertical, 5)
+                                .background(Color(.tertiarySystemFill), in: Capsule())
                         }
-                        Text("Ud fra \(c.n) \(c.n == 1 ? "tur" : "ture") og \(DK.num(c.km, 0)) km" + (c.scope == "temperature" ? " ved omtrent samme temperatur som nu." : "."))
-                            .font(.caption).foregroundStyle(.secondary)
+                        Text("Bilen bruger \(abs(pct)) % \(pct >= 0 ? "mere" : "mindre") strøm end ren fysik siger. Maps får forbruget ganget med dette tal" + (c.scope == "temperature" ? ", målt ved omtrent samme temperatur som nu." : "."))
+                            .font(.callout).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 let shown = Array(trips.prefix(20))

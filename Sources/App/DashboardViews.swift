@@ -195,11 +195,12 @@ struct TripCard: View {
                     .foregroundStyle(tint)
             }
 
-            HStack(spacing: 14) {
-                stat("road.lanes", "\(DK.num(trip.km, 0)) km")
-                stat("battery.50", "\(DK.num(trip.socFrom * 100, 0))→\(DK.num(trip.socTo * 100, 0)) %")
-                if let t = trip.tempC { stat("thermometer.medium", "\(DK.num(t, 0))°") }
-                if let v = trip.avgKmh { stat("speedometer", "\(DK.num(v, 0)) km/t") }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) { stats }
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 12) { distanceStats }
+                    HStack(spacing: 12) { conditionStats }
+                }
             }
             .font(.caption).foregroundStyle(.secondary)
 
@@ -219,8 +220,24 @@ struct TripCard: View {
         .accessibilityElement(children: .combine)
     }
 
+    @ViewBuilder private var stats: some View { distanceStats; conditionStats }
+
+    @ViewBuilder private var distanceStats: some View {
+        stat("road.lanes", "\(DK.num(trip.km, 0)) km")
+        stat("battery.50", "\(DK.num(trip.socFrom * 100, 0))→\(DK.num(trip.socTo * 100, 0)) %")
+    }
+
+    @ViewBuilder private var conditionStats: some View {
+        if let t = trip.tempC { stat("thermometer.medium", "\(DK.num(t, 0)) °C") }
+        if let v = trip.avgKmh { stat("speedometer", "\(DK.num(v, 0)) km/t") }
+    }
+
     private func stat(_ symbol: String, _ text: String) -> some View {
-        Label(text, systemImage: symbol).labelStyle(.titleAndIcon).monospacedDigit().lineLimit(1)
+        HStack(spacing: 4) {
+            Image(systemName: symbol).imageScale(.small)
+            Text(text).monospacedDigit()
+        }
+        .fixedSize()
     }
 
     private func bar(_ label: String, _ value: Double, _ color: Color) -> some View {
