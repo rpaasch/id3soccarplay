@@ -443,8 +443,12 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     /// VW keeps a hidden buffer, so the display is roughly (BMS - 5) / 0.9 (MEB). That prior is
     /// refined from pairs with the Smartcar SoC (the car's displayed value): offset from any pair,
     /// slope too once the pairs span >= 15 percentage points.
-    private static let calKey = "obdCalibration"
-    private static let pairsKey = "obdPairs"
+    // v2: pairs are now matched by time (v1 paired a minutes-old cloud value with the BMS value
+    // of "now", which was several pp off while fast charging), so the old pairs are dropped.
+    private static let calKey = "obdCalibration2"
+    private static let pairsKey = "obdPairs2"
+    /// Recent BMS readings, so a cloud value can be paired with what the BMS said at that moment.
+    private var bmsHistory: [(t: TimeInterval, bms: Double)] = []
 
     private struct Calibration: Codable { var slope: Double; var intercept: Double; var pairs: Int }
 
@@ -455,9 +459,16 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     /// Learns from a recent Smartcar value (< 10 min old, not yet used). Returns the latest residual.
     /// (VW's values reach us 1-5 min after the car measured them, so 2 min was too strict.)
-    private func learnPair(bms: Double) -> Double? {
+    private func learnPair(bms now: Double) -> Double? {
+        let tNow = Date().timeIntervalSince1970
+        bmsHistory.append((tNow, now))
+        bmsHistory.removeAll { tNow - $0.t > 900 }
         guard let cloud: VehicleState = SharedStore.codable(.lastState),
               Date().timeIntervalSince(cloud.measuredAt) < 600 else { return nil }
+        // The BMS value closest to when the car measured the cloud value (within 30 s).
+        let tc = cloud.measuredAt.timeIntervalSince1970
+        guard let match = bmsHistory.min(by: { abs($0.t - tc) < abs($1.t - tc) }), abs(match.t - tc) <= 30 else { return nil }
+        let bms = match.bms
         var pairs = (UserDefaults.standard.array(forKey: Self.pairsKey) as? [[Double]]) ?? []
         let t = cloud.measuredAt.timeIntervalSince1970
         if pairs.last?[2] != t {

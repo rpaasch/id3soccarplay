@@ -114,7 +114,7 @@ enum StateProvider {
     /// Replaces the SoC with the live OBD value (read in the car a few seconds ago) when it is
     /// fresh and its scaling was validated against Smartcar. Everything else (model hints,
     /// charging) still comes from the cloud state.
-    private static func withOBD(_ s: VehicleState, _ origin: Origin) -> (state: VehicleState, origin: Origin) {
+    static func withOBD(_ s: VehicleState, _ origin: Origin) -> (state: VehicleState, origin: Origin) {
         guard let r: OBDReading = SharedStore.codable(.obdReading), r.isFreshAndValid, r.at > s.measuredAt else { return (s, origin) }
         var v = s
         v.stateOfCharge = r.soc

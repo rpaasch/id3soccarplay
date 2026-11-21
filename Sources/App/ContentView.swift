@@ -16,6 +16,8 @@ struct ContentView: View {
     @State private var profile: VehicleProfile?
     @State private var loadError: String?
     @State private var live: VehicleState?
+    @State private var cloudState: VehicleState?   // as fetched; `live` = this with the OBD SoC applied
+    @State private var liveIsOBD = false
     @State private var liveNote = "Henter…"
     @State private var hasToken = SharedStore.string(.statusToken)?.isEmpty == false
     @State private var tokenInput = ""
@@ -43,6 +45,7 @@ struct ContentView: View {
         }
         .tint(.teal)
         .onAppear { reload(); Task { await refreshLive() } }
+        .task { await liveLoop() }
         .sheet(isPresented: $showShare) {
             if let url = exportURL { ShareSheet(items: [url]) }
         }
@@ -71,7 +74,7 @@ struct ContentView: View {
                                 Text("\(Int(r.rounded())) km").font(.title.bold()).monospacedDigit()
                                 Text("rækkevidde (bilens bud)").font(.caption).foregroundStyle(.secondary)
                             }
-                            Text(ageText(s.measuredAt)).font(.caption).foregroundStyle(.secondary)
+                            Text(liveIsOBD ? "live fra bilen (OBD)" : ageText(s.measuredAt)).font(.caption).foregroundStyle(.secondary)
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -385,6 +388,28 @@ struct ContentView: View {
         HStack { Text(k); Spacer(); Text(v).foregroundStyle(.secondary) }
     }
 
+    /// Shows the dongle's live SoC (fresh and validated) instead of the cloud value, which is
+    /// 2-5 minutes old and lags several percent while fast charging.
+    private func applyOBD() {
+        guard let c = cloudState else { return }
+        let r = StateProvider.withOBD(c, .live)
+        live = r.state
+        liveIsOBD = r.origin == .obd
+    }
+
+    /// While the app is open: OBD value every 5 s, cloud every 60 s (every 30 s while charging).
+    private func liveLoop() async {
+        var tick = 0
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(5))
+            tick += 1
+            obd = OBDManager.shared.status()
+            applyOBD()
+            let every = (cloudState?.isCharging == true) ? 6 : 12
+            if tick % every == 0 { await Task { await refreshLive() }.value }
+        }
+    }
+
     private func ageText(_ d: Date) -> String {
         let minutes = Int(Date().timeIntervalSince(d) / 60)
         if minutes < 1 { return "lige nu" }
@@ -409,7 +434,8 @@ struct ContentView: View {
         do {
             let s = try await StatusClient.fetch(timeout: 8)
             SharedStore.setCodable(s, for: .lastState)
-            live = s
+            cloudState = s
+            applyOBD()
             liveNote = "Hentet fra Workeren."
             if let r = try? await TripsClient.fetch() { trips = r.trips; tripsNote = "" } else { tripsNote = "Kunne ikke hente turene." }
             await GPSRecorder.shared.flushQueue()
@@ -428,7 +454,7 @@ struct ContentView: View {
             default: "fejl – se loggen"
             }
             if let cached: VehicleState = SharedStore.codable(.lastState) {
-                live = cached
+                cloudState = cached; applyOBD()
                 liveNote = "Kunne ikke hente friske tal (\(why)). Viser sidste kendte måling."
             } else {
                 liveNote = "Ingen data endnu (\(why))."
