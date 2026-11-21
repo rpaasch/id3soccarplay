@@ -39,6 +39,7 @@ export default {
       if (p === "/shape") return shapeEndpoint(request, env);
       if (p === "/trips") return tripsEndpoint(request, env);
       if (p === "/gps") return gpsEndpoint(request, env);
+      if (p === "/drive") return driveEndpoint(request, env);
       if (p === "/health") return new Response("ok", { status: 200 });
       return new Response("Not found", { status: 404 });
     } catch (e) {
@@ -781,7 +782,8 @@ async function learnedChargeCurve(env, tempC, warm) {
 async function cronTick(env) {
   // A trip ends 30 min after the last movement even if the sleeping car sends nothing more.
   const open = await env.STATE.get("trip_current", "json");
-  if (open && Date.now() - open.lastMoveT >= TRIP_END_IDLE_MS + 60 * 1000) await finishTrip(env, open, open.lastDriving);
+  if (open && open.endAt && Date.now() - open.endAt >= 15 * 60 * 1000) await finishTrip(env, open, open.lastDriving);
+  else if (open && !open.endAt && Date.now() - open.lastMoveT >= TRIP_END_IDLE_MS + 60 * 1000) await finishTrip(env, open, open.lastDriving);
   const snap = await env.STATE.get("snapshot", "json");
   if (!snap || snap.charging !== true) return;
   const lastPoll = Number((await env.STATE.get("last_poll_at")) || 0);
@@ -844,9 +846,16 @@ async function trackTrip(env, snap, prevEntry, tempC, log) {
   if (typeof snap.odometerKm !== "number") return;
   let trip = await env.STATE.get("trip_current", "json");
   const now = { t: snap.measuredAt, soc: snap.soc, odo: snap.odometerKm };
+  // CarPlay disconnected (Shortcuts "Slut kørsel"): the first measurement after that is the
+  // trip's final state (VW reports SoC/odometer a minute or two after parking).
+  if (trip && trip.endAt && now.t >= trip.endAt) {
+    const fresh = now.t - trip.endAt <= 15 * 60 * 1000 && snap.charging !== true && now.odo >= trip.last.odo;
+    await finishTrip(env, trip, fresh ? now : trip.lastDriving);
+    return;
+  }
   // First close a trip whose last movement is long ago: the car slept in between, and this
   // measurement belongs to whatever happens next, not to the old trip.
-  if (trip && now.t - trip.lastMoveT >= TRIP_END_IDLE_MS) {
+  if (trip && !trip.endAt && now.t - trip.lastMoveT >= TRIP_END_IDLE_MS) {
     await finishTrip(env, trip, trip.lastDriving);
     trip = null;
   }
@@ -1001,6 +1010,47 @@ function tripCalibration(trips, tempC) {
   if (near) return { ...near, scope: "temperature" };
   const all = pick(ok);
   return all ? { ...all, scope: "all" } : null;
+}
+
+// Shortcuts automation on CarPlay connect/disconnect (app intents "Start/Slut kørsel"): exact trip
+// boundaries. The odometer-based detection stays as the fallback when no event arrives.
+async function driveEndpoint(request, env) {
+  const url = new URL(request.url);
+  const token = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || url.searchParams.get("token");
+  if (!env.STATUS_TOKEN || token !== env.STATUS_TOKEN) return new Response("unauthorized", { status: 401 });
+  if (request.method !== "POST") {
+    return new Response(JSON.stringify({ events: (await env.STATE.get("drive_events", "json")) || [] }), { headers: { "content-type": "application/json" } });
+  }
+  let body;
+  try { body = await request.json(); } catch { return new Response("bad json", { status: 400 }); }
+  const event = body.event;
+  if (event !== "start" && event !== "end") return new Response("event must be start|end", { status: 400 });
+  const at = typeof body.at === "number" && Math.abs(body.at - Date.now()) < 3600e3 ? body.at : Date.now();
+  const events = (await env.STATE.get("drive_events", "json")) || [];
+  events.push({ event, at });
+  await kvPut(env, "drive_events", JSON.stringify(events.slice(-50)));
+
+  let trip = await env.STATE.get("trip_current", "json");
+  let note = "";
+  if (event === "start") {
+    if (trip && trip.endAt) { await finishTrip(env, trip, trip.lastDriving); trip = null; }
+    if (!trip) {
+      const snap = newerSnap(await env.STATE.get("snapshot", "json"), memSnap);
+      if (snap && typeof snap.odometerKm === "number" && snap.charging !== true) {
+        const lastEnd = await env.STATE.get("trip_last_end", "json");
+        const start = { t: at, soc: snap.soc, odo: snap.odometerKm }; // parked values, CarPlay's time
+        trip = { start, last: start, lastMoveT: at, lastOdoT: at, lastDriving: start, binKm: Array(10).fill(0), unbinnedKm: 0,
+          driveMs: 0, tempSum: 0, tempN: 0, parkedH: lastEnd ? r1((at - lastEnd.t) / 3600000) : null, startedBy: "carplay" };
+        await kvPut(env, "trip_current", JSON.stringify(trip));
+        note = "trip started";
+      } else note = "no usable snapshot (charging or no odometer)";
+    } else note = "trip already running";
+  } else if (trip) {
+    trip.endAt = at;
+    await kvPut(env, "trip_current", JSON.stringify(trip));
+    note = "trip ends with the next measurement (or in 15 min)";
+  } else note = "no open trip";
+  return new Response(JSON.stringify({ ok: true, note }), { headers: { "content-type": "application/json" } });
 }
 
 async function tripsEndpoint(request, env) {

@@ -100,6 +100,23 @@ final class GPSRecorder: NSObject, CLLocationManagerDelegate {
         }
     }
 
+    /// CarPlay connected (Shortcuts): switch precise GPS on now instead of waiting for movement.
+    func beginDriveNow() {
+        guard enabled else { return }
+        start()
+        precise = true
+        lastMoving = Date()
+        manager.startUpdatingLocation()
+    }
+
+    /// CarPlay disconnected: close the segment now, upload it, and let GPS sleep.
+    func endDriveNow() async {
+        finishSegment()
+        manager.stopUpdatingLocation()
+        precise = false
+        await flushQueue()
+    }
+
     func stop() {
         manager.stopUpdatingLocation()
         manager.stopMonitoringSignificantLocationChanges()

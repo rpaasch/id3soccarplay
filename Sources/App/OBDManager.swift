@@ -67,6 +67,15 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func start() { queue.async { self.startLocked() } }
 
+    /// CarPlay connected: skip any idle back-off and (re)arm the connection right away.
+    func wake() {
+        queue.async {
+            self.idleBackoffUntil = .distantPast
+            guard self.enabled else { return }
+            if let p = self.peripheral, p.state != .connected { self.central?.connect(p) } else { self.startLocked() }
+        }
+    }
+
     /// Runs the list of candidate requests once and logs every raw answer.
     func runDiagnostics() { queue.async { self.diagnosticsPending = true; self.kickLocked() } }
 
