@@ -358,6 +358,14 @@ struct ContentView: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// "0.1.0 (build 84)" — the build number is the GitHub Actions run that made the IPA.
+    private var appVersion: String {
+        let info = Bundle.main.infoDictionary
+        let v = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let b = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(v) (build \(b))"
+    }
+
     private var moreTab: some View {
         List {
             gpsSection
@@ -367,6 +375,9 @@ struct ContentView: View {
                 NavigationLink { LogView(entries: entries) } label: { Label("Log (\(entries.count))", systemImage: "doc.text.magnifyingglass") }
                 if let p = profile { row("Bil i Maps", "\(p.vehicle.mapsMake) \(p.vehicle.mapsModel) (maskering)") }
                 row("Siri-tilladelse", siriStatus)
+            }
+            Section("Om appen") {
+                row("Version", appVersion)
             }
         }
         .refreshable { reload(); await Task { await refreshLive() }.value } // own task: SwiftUI cancels the refresh task when the view redraws
