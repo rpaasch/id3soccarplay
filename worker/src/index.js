@@ -344,6 +344,13 @@ async function storeSnapshotIfNewer(env, snap) {
   if (cur && cur.measuredAt && snap.measuredAt && cur.measuredAt > snap.measuredAt) return false;
   // A webhook knows nothing about the charge type: keep what the last poll found while charging continues.
   if (cur && cur.charging === true && snap.charging === true && !snap.chargeKind && cur.chargeKind) snap.chargeKind = cur.chargeKind;
+  // ... and the time to full: count the last known value down (it is refreshed by the next poll).
+  if (cur && cur.charging === true && snap.charging === true && typeof snap.minutesToFull !== "number" && typeof cur.minutesToFull === "number") {
+    const base = typeof cur.minutesToFullAt === "number" ? cur.minutesToFullAt : cur.measuredAt;
+    const left = Math.round(cur.minutesToFull - ((snap.measuredAt || Date.now()) - base) / 60000);
+    if (left > 0) { snap.minutesToFull = cur.minutesToFull; snap.minutesToFullAt = base; }
+  }
+  if (snap.charging === true && typeof snap.minutesToFull === "number" && typeof snap.minutesToFullAt !== "number") snap.minutesToFullAt = snap.measuredAt;
   // Same measurement again (polls while parked): nothing new, so spend no KV writes (free tier: 1000/day).
   if (cur && cur.measuredAt === snap.measuredAt && ["soc", "charging", "wattageW", "odometerKm", "rangeKm", "minutesToFull", "chargeKind", "connector"]
       .every(k => cur[k] === snap[k])) return false;
@@ -1647,6 +1654,9 @@ async function statusEndpoint(request, env, ctx) {
       const last = real || chargeSession.samples[chargeSession.samples.length - 1];
       if (typeof snap.wattageW !== "number" && last) snap = { ...snap, wattageW: Math.round(last.kw * 1000) };
     }
+  }
+  if (snap.charging === true && typeof snap.minutesToFull === "number" && typeof snap.minutesToFullAt === "number") {
+    snap = { ...snap, minutesToFull: Math.max(1, Math.round(snap.minutesToFull - (Date.now() - snap.minutesToFullAt) / 60000)) };
   }
   const socEstimate = await estimateSocNow(env, snap);
   return new Response(JSON.stringify({ available: true, ageSeconds: ageSec, lastError, kvWriteError, model, chargeSession, socEstimate, ...snap }),

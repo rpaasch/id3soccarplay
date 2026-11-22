@@ -147,13 +147,18 @@ private struct Ring: View {
                 .trim(from: 0, to: max(0.01, min(1, state.stateOfCharge)))
                 .stroke(socColor(state).gradient, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-            // One centred text: the number and a small "%" share a baseline, nothing pushes it off centre.
-            (Text("\(percent(state))").font(.system(size: numberSize, weight: .bold, design: .rounded))
-                + Text("%").font(.system(size: numberSize * 0.4, weight: .semibold, design: .rounded)).foregroundColor(.secondary))
-                .monospacedDigit()
-                .minimumScaleFactor(0.6)
-                .lineLimit(1)
-                .padding(.horizontal, lineWidth + 4)
+            // The number alone, exactly centred; "%" small underneath (nothing beside it to push it off centre).
+            VStack(spacing: -2) {
+                Text("\(percent(state))")
+                    .font(.system(size: numberSize, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .minimumScaleFactor(0.6)
+                    .lineLimit(1)
+                Text("%")
+                    .font(.system(size: numberSize * 0.36, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, lineWidth + 6)
         }
     }
 }
