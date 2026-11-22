@@ -98,17 +98,6 @@ private func duration(_ minutes: Int) -> String {
     minutes < 60 ? "\(minutes) min" : "\(minutes / 60) t \(minutes % 60) min"
 }
 
-/// One short line under the ring: charging details, else range.
-private func smallLine(_ s: VehicleState) -> String {
-    if s.isCharging {
-        var parts: [String] = []
-        if let w = s.chargePowerW { parts.append("\(num(w / 1000, w < 20000 ? 1 : 0)) kW") }
-        if let m = s.minutesToFull { parts.append(duration(m)) }
-        return parts.isEmpty ? "Lader" : parts.joined(separator: " · ")
-    }
-    return s.rangeKm.map { "\(Int($0.rounded())) km" } ?? ""
-}
-
 private enum Conn {
     case ok, offline, vwError
     init(_ e: BatteryEntry) {
@@ -136,31 +125,59 @@ private struct LinkBadge: View {
     }
 }
 
-private struct Ring: View {
+/// Big percentage with a slim bar underneath: reads at a glance and never crowds.
+private struct SocBlock: View {
     let state: VehicleState
-    var lineWidth: CGFloat = 9
-    var numberSize: CGFloat = 30
+    var size: CGFloat = 46
     var body: some View {
-        ZStack {
-            Circle().inset(by: lineWidth / 2).stroke(socColor(state).opacity(0.2), lineWidth: lineWidth)
-            Circle().inset(by: lineWidth / 2)
-                .trim(from: 0, to: max(0.01, min(1, state.stateOfCharge)))
-                .stroke(socColor(state).gradient, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-            // The number alone, exactly centred; "%" small underneath (nothing beside it to push it off centre).
-            VStack(spacing: -2) {
-                Text("\(percent(state))")
-                    .font(.system(size: numberSize, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .minimumScaleFactor(0.6)
-                    .lineLimit(1)
-                Text("%")
-                    .font(.system(size: numberSize * 0.36, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline, spacing: 1) {
+                Text("\(percent(state))").font(.system(size: size, weight: .bold, design: .rounded)).monospacedDigit()
+                Text("%").font(.system(size: size * 0.42, weight: .semibold, design: .rounded)).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                if state.isCharging {
+                    Image(systemName: "bolt.fill").font(.system(size: size * 0.42, weight: .semibold)).foregroundStyle(.yellow)
+                }
             }
-            .padding(.horizontal, lineWidth + 6)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            Bar(value: state.stateOfCharge, color: socColor(state))
         }
     }
+}
+
+private struct Bar: View {
+    let value: Double
+    let color: Color
+    var body: some View {
+        GeometryReader { g in
+            ZStack(alignment: .leading) {
+                Capsule().fill(color.opacity(0.22))
+                Capsule().fill(color.gradient).frame(width: max(6, g.size.width * min(1, max(0, value))))
+            }
+        }
+        .frame(height: 6)
+    }
+}
+
+/// Main line under the number: charging power and type, else the range.
+private func primaryLine(_ s: VehicleState) -> String {
+    if s.isCharging {
+        var parts: [String] = []
+        if let w = s.chargePowerW { parts.append("\(num(w / 1000, w < 20000 ? 1 : 0)) kW") }
+        if let k = s.chargeKind { parts.append(k.uppercased()) }
+        return parts.isEmpty ? "Lader" : parts.joined(separator: " · ")
+    }
+    return s.rangeKm.map { "\(Int($0.rounded())) km" } ?? "–"
+}
+
+/// Second line: when the car is full (while charging), else when it was measured.
+private func secondaryLine(_ s: VehicleState) -> Text {
+    if s.isCharging, let m = s.minutesToFull {
+        let full = Date().addingTimeInterval(Double(m) * 60)
+        return Text("fuld kl. " + full.formatted(.dateTime.hour().minute().locale(dk)))
+    }
+    return Text("målt ") + ageText(s.measuredAt)
 }
 
 private struct Row: View {
@@ -209,45 +226,47 @@ struct BatteryWidgetView: View {
             case .accessoryInline:
                 Text("ID.3 \(percent(s)) %" + (s.rangeKm.map { " · \(Int($0.rounded())) km" } ?? "") + (link == .ok ? "" : " · \(link.short)"))
             case .systemMedium:
-                HStack(spacing: 14) {
-                    Ring(state: s).frame(width: 92, height: 92)
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack {
-                            if let r = s.rangeKm {
-                                Text("\(Int(r.rounded())) km").font(.system(.title3, design: .rounded).bold()).monospacedDigit()
-                            }
-                            Spacer(minLength: 4)
-                            LinkBadge(link: link)
-                        }
-                        Text(statusText(s)).font(.caption).foregroundStyle(s.isCharging ? .yellow : .secondary)
-                        if let m = s.model, let city = binValue(m, 2), let mw = binValue(m, 6) {
-                            Text("Maps: by \(num(city, 0)) · motorvej \(num(mw, 0)) kWh").font(.caption2).foregroundStyle(.secondary)
-                        }
-                        if let t = s.model?.temperatureC {
-                            Text("\(num(t, 0)) °C · \(s.model?.batteryWarm == true ? "varmt" : "koldt") batteri").font(.caption2).foregroundStyle(.secondary)
-                        }
-                        ageText(s.measuredAt).font(.caption2).foregroundStyle(.tertiary)
+                HStack(alignment: .top, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        header(link)
+                        Spacer(minLength: 4)
+                        SocBlock(state: s)
+                        Spacer(minLength: 8)
+                        Text(primaryLine(s))
+                            .font(.system(.subheadline, design: .rounded).weight(.semibold)).monospacedDigit()
+                            .foregroundStyle(s.isCharging ? .yellow : .primary)
+                            .lineLimit(1).minimumScaleFactor(0.8)
+                        secondaryLine(s).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Maps regner med").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                        if let m = s.model {
+                            mediumRow("by", binValue(m, 2))
+                            mediumRow("landevej", binValue(m, 4))
+                            mediumRow("motorvej", binValue(m, 6))
+                            if let t = m.temperatureC {
+                                Text("\(num(t, 0)) °C · \(m.batteryWarm == true ? "varmt" : "koldt") batteri")
+                                    .font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             case .systemLarge:
                 large(s, link)
             default:
-                // Small (also the CarPlay widget): one glance, nothing that ticks.
-                VStack(spacing: 6) {
-                    HStack(spacing: 4) {
-                        Text("ID.3").font(.caption.weight(.bold)).foregroundStyle(.secondary)
-                        Spacer(minLength: 0)
-                        ageText(s.measuredAt).font(.caption2).foregroundStyle(.secondary).monospacedDigit()
-                        Image(systemName: link.symbol).font(.caption2).foregroundStyle(link.color)
-                    }
-                    Ring(state: s, lineWidth: 10, numberSize: 32).frame(maxWidth: .infinity, maxHeight: .infinity)
-                    HStack(spacing: 3) {
-                        if s.isCharging { Image(systemName: "bolt.fill") }
-                        Text(smallLine(s))
-                    }
-                    .font(.system(.subheadline, design: .rounded).bold()).monospacedDigit()
-                    .foregroundStyle(s.isCharging ? .yellow : .primary)
-                    .lineLimit(1).minimumScaleFactor(0.8)
+                // Small (also the CarPlay widget): one glance, left-aligned, nothing that ticks.
+                VStack(alignment: .leading, spacing: 0) {
+                    header(link)
+                    Spacer(minLength: 4)
+                    SocBlock(state: s)
+                    Spacer(minLength: 8)
+                    Text(primaryLine(s))
+                        .font(.system(.subheadline, design: .rounded).weight(.semibold)).monospacedDigit()
+                        .foregroundStyle(s.isCharging ? .yellow : .primary)
+                        .lineLimit(1).minimumScaleFactor(0.8)
+                    secondaryLine(s).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
         } else {
@@ -258,11 +277,29 @@ struct BatteryWidgetView: View {
         }
     }
 
+    /// "ID.3" and a small connection dot (green / orange / red).
+    private func header(_ link: Conn) -> some View {
+        HStack(spacing: 5) {
+            Text("ID.3").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            Circle().fill(link.color).frame(width: 7, height: 7)
+        }
+    }
+
+    private func mediumRow(_ label: String, _ value: Double?) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            Spacer(minLength: 4)
+            Text(value.map { num($0, 0) } ?? "–").font(.system(.callout, design: .rounded).bold()).monospacedDigit()
+            Text("kWh").font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+
     /// Everything the Worker knows, on one widget.
     private func large(_ s: VehicleState, _ link: Conn) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 14) {
-                Ring(state: s, lineWidth: 11, numberSize: 36).frame(width: 104, height: 104)
+                SocBlock(state: s, size: 52).frame(width: 150)
                 VStack(alignment: .leading, spacing: 3) {
                     if let r = s.rangeKm {
                         Text("\(Int(r.rounded())) km").font(.system(.title2, design: .rounded).bold()).monospacedDigit()
