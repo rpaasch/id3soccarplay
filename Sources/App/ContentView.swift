@@ -8,6 +8,7 @@
 //
 
 import SwiftUI
+import WidgetKit
 import Charts
 import UIKit
 import Intents
@@ -529,7 +530,10 @@ struct ContentView: View {
         do {
             let s = try await StatusClient.fetch(timeout: 8)
             SharedStore.setCodable(s, for: .lastState)
+            let changed = live.map { Int($0.stateOfCharge * 100) != Int(s.stateOfCharge * 100) || $0.isCharging != s.isCharging } ?? true
             live = s
+            if changed { WidgetCenter.shared.reloadAllTimelines() }
+            await DriveEvents.flush()
             liveNote = "Hentet fra Workeren."
             if let r = try? await TripsClient.fetch() { trips = r.trips; bands = r.bands ?? []; tripsNote = "" } else { tripsNote = "Kunne ikke hente turene." }
             await GPSRecorder.shared.flushQueue()

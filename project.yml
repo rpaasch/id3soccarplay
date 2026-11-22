@@ -51,6 +51,8 @@ targets:
     dependencies:
       - target: ID3Extension
         embed: true
+      - target: ID3Widget
+        embed: true
 
   ID3Extension:
     type: app-extension
@@ -69,3 +71,22 @@ targets:
         PRODUCT_NAME: ID3Extension
         INFOPLIST_FILE: Sources/Extension/Info.plist
         CODE_SIGN_ENTITLEMENTS: Sources/Extension/Extension.entitlements
+
+  ID3Widget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Sources/Widget
+        excludes:
+          - Info.plist
+          - Widget.entitlements
+      - path: Sources/Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.porsche.one.widget
+        PRODUCT_NAME: ID3Widget
+        INFOPLIST_FILE: Sources/Widget/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Sources/Widget/Widget.entitlements
+    dependencies:
+      - sdk: WidgetKit.framework
+      - sdk: SwiftUI.framework

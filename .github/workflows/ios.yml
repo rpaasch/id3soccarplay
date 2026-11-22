@@ -61,6 +61,7 @@ jobs:
       PROFILE_NAME: ID3 Ad Hoc
       APP_BUNDLE_ID: com.porsche.one
       EXT_BUNDLE_ID: com.porsche.one.extension
+      WIDGET_BUNDLE_ID: com.porsche.one.widget
       WORKER: https://id3.78fvr47qyz.workers.dev
       OIDC_AUDIENCE: id3maps-ci
     steps:
@@ -142,6 +143,7 @@ jobs:
             <key>provisioningProfiles</key><dict>
               <key>$APP_BUNDLE_ID</key><string>$PROFILE_NAME</string>
               <key>$EXT_BUNDLE_ID</key><string>$PROFILE_NAME</string>
+              <key>$WIDGET_BUNDLE_ID</key><string>$PROFILE_NAME</string>
             </dict>
             <key>compileBitcode</key><false/>
             <key>stripSwiftSymbols</key><true/>

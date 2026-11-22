@@ -50,18 +50,53 @@ struct ID3Shortcuts: AppShortcutsProvider {
     }
 }
 
+/// Start/end events for the Worker. Queued on the phone and retried, so a moment without
+/// network (22 Nov: "drive end not sent") no longer loses a trip boundary. Each event keeps the
+/// time it happened; the Worker accepts times up to an hour old.
 enum DriveEvents {
+    private struct Pending: Codable { let event: String; let at: Double }
+    private static let queueKey = "driveEventQueue"
+
+    private static func load() -> [Pending] {
+        guard let d = UserDefaults.standard.data(forKey: queueKey) else { return [] }
+        return (try? JSONDecoder().decode([Pending].self, from: d)) ?? []
+    }
+
+    private static func save(_ q: [Pending]) {
+        UserDefaults.standard.set(try? JSONEncoder().encode(q), forKey: queueKey)
+    }
+
     static func send(_ event: String) async {
+        var q = load()
+        q.append(Pending(event: event, at: Date().timeIntervalSince1970 * 1000))
+        save(Array(q.suffix(20)))
+        await flush()
+    }
+
+    /// Sends queued events in order; stops at the first failure and keeps the rest for later.
+    static func flush() async {
         guard let token = SharedStore.string(.statusToken), !token.isEmpty else { return }
-        var request = URLRequest(url: URL(string: "https://id3.78fvr47qyz.workers.dev/drive")!, timeoutInterval: 10)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["event": event, "at": Date().timeIntervalSince1970 * 1000])
-        do {
-            _ = try await URLSession.shared.data(for: request)
-        } catch {
-            SharedLog.shared.log("drive \(event) not sent: \(error)", category: "drive")
+        var q = load()
+        while let first = q.first {
+            if Date().timeIntervalSince1970 * 1000 - first.at > 55 * 60 * 1000 {
+                SharedLog.shared.log("drive \(first.event) dropped (older than 55 min)", category: "drive")
+                q.removeFirst()
+                continue
+            }
+            var request = URLRequest(url: URL(string: "https://id3.78fvr47qyz.workers.dev/drive")!, timeoutInterval: 10)
+            request.httpMethod = "POST"
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try? JSONSerialization.data(withJSONObject: ["event": first.event, "at": first.at])
+            do {
+                let (_, response) = try await URLSession.shared.data(for: request)
+                guard (response as? HTTPURLResponse)?.statusCode == 200 else { break }
+                q.removeFirst()
+            } catch {
+                SharedLog.shared.log("drive \(first.event) not sent yet (kept for later): \((error as? URLError)?.code.rawValue ?? 0)", category: "drive")
+                break
+            }
         }
+        save(q)
     }
 }
