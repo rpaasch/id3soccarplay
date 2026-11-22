@@ -41,12 +41,38 @@ struct EndDriveIntent: AppIntent {
     }
 }
 
+/// "Hey Siri, fejl i ID3Maps": marks the moment Maps reported a lost connection, so it can be
+/// found in the log afterwards. Also checks right away whether the Worker answers and how fast.
+struct MarkIssueIntent: AppIntent {
+    static let title: LocalizedStringResource = "Markér fejl"
+    static let description = IntentDescription("Sætter et mærke i loggen, når Maps siger, at forbindelsen er mistet, og tjekker forbindelsen.")
+    static let openAppWhenRun = false
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let t0 = Date()
+        var result: String
+        do {
+            let s = try await StatusClient.fetch(timeout: 8)
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            result = "Worker OK på \(ms) ms, SoC \(Int((s.stateOfCharge * 100).rounded())) %, bilens tal \(Int(Date().timeIntervalSince(s.measuredAt) / 60)) min gamle"
+        } catch {
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            result = "Worker svarede IKKE (\((error as? URLError)?.code.rawValue ?? 0), \(ms) ms)"
+        }
+        SharedLog.shared.log("USER MARK: Maps mistede forbindelsen. \(result)", category: "mark")
+        return .result(dialog: "Markeret. \(result.hasPrefix("Worker OK") ? "Forbindelsen til Workeren virker." : "Workeren svarede ikke.")")
+    }
+}
+
 struct ID3Shortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(intent: StartDriveIntent(), phrases: ["Start kørsel i \(.applicationName)"],
                     shortTitle: "Start kørsel", systemImageName: "car.fill")
         AppShortcut(intent: EndDriveIntent(), phrases: ["Slut kørsel i \(.applicationName)"],
                     shortTitle: "Slut kørsel", systemImageName: "parkingsign")
+        AppShortcut(intent: MarkIssueIntent(), phrases: ["Fejl i \(.applicationName)", "Markér fejl i \(.applicationName)"],
+                    shortTitle: "Markér fejl", systemImageName: "exclamationmark.bubble")
     }
 }
 
