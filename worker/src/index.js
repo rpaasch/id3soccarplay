@@ -868,6 +868,8 @@ function tripStartFrom(log, prevEntry, afterT) {
   return { t: start.t, soc: start.soc, odo: start.odo };
 }
 
+const CARPLAY_GRACE_MS = 3 * 60 * 1000;
+
 async function trackTrip(env, snap, prevEntry, tempC, log) {
   if (typeof snap.odometerKm !== "number") return;
   let trip = await env.STATE.get("trip_current", "json");
@@ -927,6 +929,8 @@ function flushPend(trip, final) {
 async function finishTrip(env, trip, end) {
   flushPend(trip, true);
   try { await env.STATE.delete("trip_current"); } catch { /* best effort */ }
+  // Kept briefly so a CarPlay blip (end + start within a few minutes) can reopen the same trip.
+  await kvPut(env, "trip_last_closed", JSON.stringify({ trip, closedAt: Date.now() }));
   await kvPut(env, "trip_last_end", JSON.stringify({ t: end.t }));
   let km = end.odo - trip.start.odo;
   const dSoc = trip.start.soc - end.soc;
@@ -1198,7 +1202,27 @@ async function driveEndpoint(request, env) {
   let trip = await env.STATE.get("trip_current", "json");
   let note = "";
   if (event === "start") {
+    if (trip && trip.endAt && at - trip.endAt < CARPLAY_GRACE_MS) {
+      delete trip.endAt; // CarPlay dropped for a moment: same trip
+      await kvPut(env, "trip_current", JSON.stringify(trip));
+      return new Response(JSON.stringify({ ok: true, note: "trip resumed after a short CarPlay drop" }), { headers: { "content-type": "application/json" } });
+    }
     if (trip && trip.endAt) { await finishTrip(env, trip, trip.lastDriving); trip = null; }
+    if (!trip) {
+      // The trip was already closed by the measurement right after the blip: reopen it.
+      const closed = await env.STATE.get("trip_last_closed", "json");
+      const ended = closed?.trip?.endAt;
+      if (closed && typeof ended === "number" && at - ended < CARPLAY_GRACE_MS && Date.now() - closed.closedAt < 30 * 60e3) {
+        trip = closed.trip;
+        delete trip.endAt;
+        const trips = (await env.STATE.get("trips", "json")) || [];
+        const kept = trips.filter((x) => x.start !== trip.start.t);
+        if (kept.length !== trips.length) await kvPut(env, "trips", JSON.stringify(kept));
+        await kvPut(env, "trip_current", JSON.stringify(trip));
+        try { await env.STATE.delete("trip_last_closed"); } catch { /* best effort */ }
+        return new Response(JSON.stringify({ ok: true, note: "trip reopened after a short CarPlay drop" }), { headers: { "content-type": "application/json" } });
+      }
+    }
     if (!trip) {
       const snap = newerSnap(await env.STATE.get("snapshot", "json"), memSnap);
       if (snap && typeof snap.odometerKm === "number" && snap.charging !== true) {
