@@ -694,9 +694,14 @@ async function learnCharging(env, snap, tempC, log) {
         return;
       }
       if (snap.soc <= last.soc || snap.measuredAt - last.t < 30000) return;
+      // Slope from when the previous whole percent was first reported, not from the last report
+      // (22 Nov, AC: 1 pp one minute after the last 30 % report gave "44 kW" on an 11 kW charger).
+      let ref = last;
+      for (let i = sess.samples.length - 1; i >= 0 && sess.samples[i].soc === last.soc; i--) ref = sess.samples[i];
       const net = await netCapacityKwh(env);
-      power = ((snap.soc - last.soc) * net) / ((snap.measuredAt - last.t) / 3600000);
-      if (!(power > 1 && power < 400)) return;
+      power = ((snap.soc - ref.soc) * net) / ((snap.measuredAt - ref.t) / 3600000);
+      const isAc = snap.chargeKind === "ac" || snap.connector === "ac" || sess.connector === "ac";
+      if (!(power > 1 && power < (isAc ? 12.5 : 400))) return;
       derived = true;
     }
     if (last && last.t === snap.measuredAt && last.derived && !derived) {
@@ -1636,7 +1641,10 @@ async function statusEndpoint(request, env, ctx) {
       chargeSession = { startedAt: sess.startedAt, warm: !!sess.warm,
         samples: (sess.samples || []).filter((x) => typeof x.kw === "number").slice(-120).map((x) => ({ t: x.t, soc: x.soc, kw: x.kw })) };
       // Webhook snapshots carry no power: show the latest session sample instead of nothing.
-      const last = chargeSession.samples[chargeSession.samples.length - 1];
+      // Prefer a real reading from the last 15 min over a value derived from the SoC slope.
+      const all = sess.samples || [];
+      const real = [...all].reverse().find((x) => typeof x.kw === "number" && !x.derived && snap.measuredAt - x.t <= 15 * 60e3);
+      const last = real || chargeSession.samples[chargeSession.samples.length - 1];
       if (typeof snap.wattageW !== "number" && last) snap = { ...snap, wattageW: Math.round(last.kw * 1000) };
     }
   }

@@ -74,8 +74,8 @@ private func statusText(_ s: VehicleState) -> String {
     guard s.isCharging else { return "Parkeret" }
     var t = "Lader"
     if let k = s.chargeKind { t += " " + k.uppercased() }
-    if let w = s.chargePowerW { t += " · \(Int((w / 1000).rounded())) kW" }
-    if let m = s.minutesToFull { t += " · \(m) min" }
+    if let w = s.chargePowerW { t += " · \(num(w / 1000, w < 20000 ? 1 : 0)) kW" }
+    if let m = s.minutesToFull { t += " · \(duration(m))" }
     return t
 }
 
@@ -93,12 +93,17 @@ private func ageText(_ d: Date) -> Text {
     return Text(d.formatted(.dateTime.day().month(.defaultDigits).locale(dk)) + " " + time)
 }
 
+/// "25 min" or "4 t 55 min".
+private func duration(_ minutes: Int) -> String {
+    minutes < 60 ? "\(minutes) min" : "\(minutes / 60) t \(minutes % 60) min"
+}
+
 /// One short line under the ring: charging details, else range.
 private func smallLine(_ s: VehicleState) -> String {
     if s.isCharging {
         var parts: [String] = []
-        if let w = s.chargePowerW { parts.append("\(Int((w / 1000).rounded())) kW") }
-        if let m = s.minutesToFull { parts.append("\(m) min") }
+        if let w = s.chargePowerW { parts.append("\(num(w / 1000, w < 20000 ? 1 : 0)) kW") }
+        if let m = s.minutesToFull { parts.append(duration(m)) }
         return parts.isEmpty ? "Lader" : parts.joined(separator: " · ")
     }
     return s.rangeKm.map { "\(Int($0.rounded())) km" } ?? ""
@@ -134,6 +139,7 @@ private struct LinkBadge: View {
 private struct Ring: View {
     let state: VehicleState
     var lineWidth: CGFloat = 9
+    var numberSize: CGFloat = 30
     var body: some View {
         ZStack {
             Circle().inset(by: lineWidth / 2).stroke(socColor(state).opacity(0.2), lineWidth: lineWidth)
@@ -141,13 +147,13 @@ private struct Ring: View {
                 .trim(from: 0, to: max(0.01, min(1, state.stateOfCharge)))
                 .stroke(socColor(state).gradient, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-            VStack(spacing: 0) {
-                if state.isCharging { Image(systemName: "bolt.fill").font(.caption2).foregroundStyle(.yellow) }
-                HStack(alignment: .firstTextBaseline, spacing: 1) {
-                    Text("\(percent(state))").font(.system(.title, design: .rounded).bold()).monospacedDigit()
-                    Text("%").font(.caption2).foregroundStyle(.secondary)
-                }
-            }
+            // One centred text: the number and a small "%" share a baseline, nothing pushes it off centre.
+            (Text("\(percent(state))").font(.system(size: numberSize, weight: .bold, design: .rounded))
+                + Text("%").font(.system(size: numberSize * 0.4, weight: .semibold, design: .rounded)).foregroundColor(.secondary))
+                .monospacedDigit()
+                .minimumScaleFactor(0.6)
+                .lineLimit(1)
+                .padding(.horizontal, lineWidth + 4)
         }
     }
 }
@@ -229,11 +235,14 @@ struct BatteryWidgetView: View {
                         ageText(s.measuredAt).font(.caption2).foregroundStyle(.secondary).monospacedDigit()
                         Image(systemName: link.symbol).font(.caption2).foregroundStyle(link.color)
                     }
-                    Ring(state: s, lineWidth: 10).frame(maxWidth: .infinity, maxHeight: .infinity)
-                    Text(smallLine(s))
-                        .font(.system(.subheadline, design: .rounded).bold()).monospacedDigit()
-                        .foregroundStyle(s.isCharging ? .yellow : .primary)
-                        .lineLimit(1).minimumScaleFactor(0.8)
+                    Ring(state: s, lineWidth: 10, numberSize: 32).frame(maxWidth: .infinity, maxHeight: .infinity)
+                    HStack(spacing: 3) {
+                        if s.isCharging { Image(systemName: "bolt.fill") }
+                        Text(smallLine(s))
+                    }
+                    .font(.system(.subheadline, design: .rounded).bold()).monospacedDigit()
+                    .foregroundStyle(s.isCharging ? .yellow : .primary)
+                    .lineLimit(1).minimumScaleFactor(0.8)
                 }
             }
         } else {
@@ -248,7 +257,7 @@ struct BatteryWidgetView: View {
     private func large(_ s: VehicleState, _ link: Conn) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 14) {
-                Ring(state: s, lineWidth: 11).frame(width: 104, height: 104)
+                Ring(state: s, lineWidth: 11, numberSize: 36).frame(width: 104, height: 104)
                 VStack(alignment: .leading, spacing: 3) {
                     if let r = s.rangeKm {
                         Text("\(Int(r.rounded())) km").font(.system(.title2, design: .rounded).bold()).monospacedDigit()
