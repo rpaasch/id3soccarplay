@@ -928,8 +928,15 @@ async function finishTrip(env, trip, end) {
   flushPend(trip, true);
   try { await env.STATE.delete("trip_current"); } catch { /* best effort */ }
   await kvPut(env, "trip_last_end", JSON.stringify({ t: end.t }));
-  const km = end.odo - trip.start.odo;
+  let km = end.odo - trip.start.odo;
   const dSoc = trip.start.soc - end.soc;
+  // VW's odometer can lag far behind (22 Nov: 10 km reported only after the trip ended). If the
+  // battery clearly dropped, take the distance from the iPhone's GPS segments for the same time.
+  let odoTo = end.odo;
+  if (km < TRIP_MIN_KM && dSoc >= 0.02) {
+    const g = gpsFor({ start: trip.start.t, end: end.t, km: 0 }, await env.STATE.get("gps_segments", "json"));
+    if (g && g.km >= TRIP_MIN_KM) { km = r1(g.km); odoTo = trip.start.odo + km; }
+  }
   if (km < TRIP_MIN_KM || dSoc < 0) return;
   const binKm = trip.binKm.slice();
   const binned = binKm.reduce((a, b) => a + b, 0);
@@ -949,7 +956,7 @@ async function finishTrip(env, trip, end) {
     kwh: r1(kwh), kwhPer100: r1((kwh / km) * 100), tempC: tempC == null ? null : r1(tempC),
     avgKmh: Math.round(km / hours), binKm: binKm.map(r1),
     predictedKwh: r1(predicted), predictedPer100: r1((predicted / km) * 100), ratio: Math.round((kwh / predicted) * 100) / 100,
-    cold: coldStart, parkedH: trip.parkedH, odoFrom: trip.start.odo, odoTo: end.odo,
+    cold: coldStart, parkedH: trip.parkedH, odoFrom: trip.start.odo, odoTo,
   };
   applyGps(rec, await env.STATE.get("gps_segments", "json"));
   const trips = (await env.STATE.get("trips", "json")) || [];
@@ -957,7 +964,12 @@ async function finishTrip(env, trip, end) {
   // in force when the trip started (from the trips before it).
   const bandsBefore = await getBands(env, trips);
   rec.mapsFactor = bandCalibration(bandsBefore, trips, rec.tempC)?.factor ?? 1;
-  trips.push(rec);
+  // The same trip can be finished twice (KV is eventually consistent across isolates, so a stale
+  // trip_current may be seen once more). Keep one record per start: the longer one.
+  const dup = trips.findIndex((x) => x.start === rec.start);
+  if (dup >= 0) {
+    if (rec.km >= trips[dup].km) trips[dup] = { ...rec, mapsFactor: trips[dup].mapsFactor ?? rec.mapsFactor };
+  } else trips.push(rec);
   await kvPut(env, "trips", JSON.stringify(trips.slice(-100)));
   await recordBand(env, trips, bandsBefore);
 }

@@ -250,7 +250,8 @@ struct ContentView: View {
                 ForEach(bands) { b in bandRow(b) }
             }
             HStack(spacing: 14) {
-                Label("lader lært, varmt batteri", systemImage: "bolt.fill").foregroundStyle(.orange)
+                Text("Ladekurve lært:").foregroundStyle(.secondary)
+                Label("varmt batteri", systemImage: "bolt.fill").foregroundStyle(.orange)
                 Label("koldt", systemImage: "bolt.fill").foregroundStyle(.cyan)
             }
             .font(.caption2)
@@ -258,26 +259,28 @@ struct ContentView: View {
     }
 
     private func bandRow(_ b: TempBand) -> some View {
-        HStack(spacing: 10) {
-            Text("\(b.band) til \(b.band + 5) °C")
-                .font(.callout.weight(b.current ? .semibold : .regular)).monospacedDigit()
-                .frame(width: 110, alignment: .leading)
+        HStack(alignment: .center, spacing: 8) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("\(b.band) til \(b.band + 5) °C")
+                    .font(.callout.weight(b.current ? .semibold : .regular)).monospacedDigit()
+                if b.current { Text("i dag").font(.caption2.bold()).foregroundStyle(.teal) }
+            }
+            .fixedSize()
+            Spacer(minLength: 8)
             if let f = b.factor {
-                Text("×" + DK.num(f, 2)).font(.callout.bold()).monospacedDigit()
-                Text("\(DK.num(b.km, 0)) km").font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                Text("×" + DK.num(f, 2)).font(.callout.bold()).monospacedDigit().fixedSize()
+                Text("\(DK.num(b.km, 0)) km").font(.caption).foregroundStyle(.secondary).monospacedDigit().fixedSize()
             } else {
-                Text(b.km > 0 ? "\(DK.num(b.km, 0)) km – for lidt" : "ingen ture").font(.caption).foregroundStyle(.tertiary)
+                Text(b.km > 0 ? "\(DK.num(b.km, 0)) km – for lidt" : "ingen ture").font(.caption).foregroundStyle(.tertiary).fixedSize()
             }
-            Spacer(minLength: 4)
-            if b.chargeWarm > 0 { Image(systemName: "bolt.fill").foregroundStyle(.orange) }
-            if b.chargeCold > 0 { Image(systemName: "bolt.fill").foregroundStyle(.cyan) }
-            if b.current {
-                Text("nu").font(.caption2.bold()).padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(Color.teal.opacity(0.2), in: Capsule()).foregroundStyle(.teal)
+            HStack(spacing: 2) {
+                Image(systemName: "bolt.fill").foregroundStyle(b.chargeWarm > 0 ? Color.orange : Color.clear)
+                Image(systemName: "bolt.fill").foregroundStyle(b.chargeCold > 0 ? Color.cyan : Color.clear)
             }
+            .font(.caption)
         }
-        .padding(.vertical, 6).padding(.horizontal, 8)
-        .background(b.current ? Color.teal.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .padding(.vertical, 8).padding(.horizontal, 10)
+        .background(b.current ? Color.teal.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .accessibilityElement(children: .combine)
     }
 
