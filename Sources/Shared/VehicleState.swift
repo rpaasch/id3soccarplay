@@ -32,6 +32,8 @@ struct VehicleState: Sendable, Codable {
     var contactAt: Date? = nil
     /// True when `stateOfCharge` is projected forward from VW's last value during a drive.
     var socEstimated: Bool? = nil
+    /// The Worker's last error talking to VW/Smartcar (nil = fine).
+    var workerError: String? = nil
 }
 
 /// One measurement of the current charging session.

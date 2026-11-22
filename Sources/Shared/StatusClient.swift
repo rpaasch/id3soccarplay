@@ -90,7 +90,8 @@ enum StatusClient {
             chargePowerW: status.charging == true ? status.wattageW : nil,
             chargeSamples: status.charging == true ? status.chargeSession?.samples : nil,
             contactAt: Date(),
-            socEstimated: status.socEstimate != nil
+            socEstimated: status.socEstimate != nil,
+            workerError: (status.lastError?.isEmpty == false) ? status.lastError : nil
         )
     }
 }

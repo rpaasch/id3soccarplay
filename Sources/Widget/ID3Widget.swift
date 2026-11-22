@@ -2,10 +2,12 @@
 //  ID3Widget.swift
 //  ID3Maps widget extension.
 //
-//  Battery widget for the home screen (small/medium) and the lock screen (circular, rectangular,
-//  inline). Fetches the Worker status itself, falls back to the last state the app or the Maps
-//  extension saved in the shared keychain. Refreshes every 30 min (10 min while charging); the
-//  app also reloads it whenever the SoC or charging state changes.
+//  Battery widget for the home screen (small, medium, large) and the lock screen (circular,
+//  rectangular, inline). Fetches the Worker status itself and falls back to the last state the
+//  app or the Maps extension saved in the shared keychain. Shows whether the connection works:
+//  green = fresh from the Worker, orange = no connection (last known values), red = the Worker
+//  cannot reach VW. Refreshes every 30 min (10 min while charging); the app also reloads it
+//  whenever the SoC or charging state changes.
 //
 
 import WidgetKit
@@ -14,17 +16,20 @@ import AppIntents
 
 struct BatteryWidgetIntent: WidgetConfigurationIntent {
     static let title: LocalizedStringResource = "ID.3 batteri"
-    static let description = IntentDescription("Batteriprocent, rækkevidde og ladning.")
+    static let description = IntentDescription("Batteri, rækkevidde, ladning, forbrug og forbindelse.")
     init() {}
 }
 
 struct BatteryEntry: TimelineEntry {
     let date: Date
     let state: VehicleState?
+    /// True when this entry was fetched from the Worker just now (false = last known values).
+    let online: Bool
 
     static let sample = BatteryEntry(
         date: .now,
-        state: VehicleState(stateOfCharge: 0.62, measuredAt: .now, isCharging: false, rangeKm: 231)
+        state: VehicleState(stateOfCharge: 0.62, measuredAt: .now, isCharging: false, rangeKm: 231),
+        online: true
     )
 }
 
@@ -33,23 +38,28 @@ struct BatteryProvider: AppIntentTimelineProvider {
 
     func snapshot(for configuration: BatteryWidgetIntent, in context: Context) async -> BatteryEntry {
         if context.isPreview { return .sample }
-        return BatteryEntry(date: .now, state: SharedStore.codable(.lastState))
+        return BatteryEntry(date: .now, state: SharedStore.codable(.lastState), online: false)
     }
 
     func timeline(for configuration: BatteryWidgetIntent, in context: Context) async -> Timeline<BatteryEntry> {
         var state: VehicleState? = SharedStore.codable(.lastState)
+        var online = false
         if let fresh = try? await StatusClient.fetch(timeout: 10, retryOnTimeout: true) {
             state = fresh
+            online = true
             SharedStore.setCodable(fresh, for: .lastState)
         }
-        let minutes: Double = state?.isCharging == true ? 10 : 30
-        return Timeline(entries: [BatteryEntry(date: .now, state: state)],
+        // Retry sooner when offline or charging.
+        let minutes: Double = !online ? 15 : (state?.isCharging == true ? 10 : 30)
+        return Timeline(entries: [BatteryEntry(date: .now, state: state, online: online)],
                         policy: .after(.now.addingTimeInterval(minutes * 60)))
     }
 }
 
-// MARK: Views
+// MARK: Helpers
 
+private let dk = Locale(identifier: "da_DK")
+private func num(_ v: Double, _ d: Int = 1) -> String { v.formatted(.number.precision(.fractionLength(d)).locale(dk)) }
 private func percent(_ s: VehicleState) -> Int { Int((s.stateOfCharge * 100).rounded()) }
 
 private func socColor(_ s: VehicleState) -> Color {
@@ -64,13 +74,48 @@ private func statusText(_ s: VehicleState) -> String {
     guard s.isCharging else { return "Parkeret" }
     var t = "Lader"
     if let k = s.chargeKind { t += " " + k.uppercased() }
+    if let w = s.chargePowerW { t += " · \(Int((w / 1000).rounded())) kW" }
     if let m = s.minutesToFull { t += " · \(m) min" }
     return t
 }
 
+/// kWh/100 km Maps uses at speed bin `i` (bins are 20 km/h wide), heating included.
+private func binValue(_ m: ModelHints, _ i: Int) -> Double? {
+    guard let bins = m.consumptionBinsKwhPer100, bins.count == 10 else { return nil }
+    let mids = [10.0, 30, 50, 70, 90, 110, 130, 150, 170, 190]
+    return bins[i] + (m.auxPowerW ?? 500) / 1000 / mids[i] * 100
+}
+
 /// "for 3 min. siden", updated by the system without reloading the widget.
-private func ageText(_ s: VehicleState) -> Text {
-    Text("for ") + Text(s.measuredAt, style: .relative) + Text(" siden")
+private func ageText(_ d: Date) -> Text {
+    Text("for ") + Text(d, style: .relative) + Text(" siden")
+}
+
+private enum Conn {
+    case ok, offline, vwError
+    init(_ e: BatteryEntry) {
+        if !e.online { self = .offline }
+        else if e.state?.workerError != nil { self = .vwError }
+        else { self = .ok }
+    }
+    var color: Color { switch self { case .ok: .green; case .offline: .orange; case .vwError: .red } }
+    var short: String { switch self { case .ok: "Forbundet"; case .offline: "Offline"; case .vwError: "VW svarer ikke" } }
+    var symbol: String {
+        switch self { case .ok: "checkmark.circle.fill"; case .offline: "wifi.slash"; case .vwError: "exclamationmark.triangle.fill" }
+    }
+}
+
+private struct LinkBadge: View {
+    let link: Conn
+    var showText = true
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: link.symbol)
+            if showText { Text(link.short) }
+        }
+        .font(.caption2.weight(.semibold))
+        .foregroundStyle(link.color)
+    }
 }
 
 private struct Ring: View {
@@ -94,6 +139,21 @@ private struct Ring: View {
     }
 }
 
+private struct Row: View {
+    let symbol: String
+    let text: String
+    var tint: Color = .secondary
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: symbol).frame(width: 16).foregroundStyle(tint)
+            Text(text).lineLimit(1).minimumScaleFactor(0.8)
+        }
+        .font(.caption)
+    }
+}
+
+// MARK: Views
+
 struct BatteryWidgetView: View {
     @Environment(\.widgetFamily) private var family
     let entry: BatteryEntry
@@ -104,47 +164,57 @@ struct BatteryWidgetView: View {
 
     @ViewBuilder private var content: some View {
         if let s = entry.state {
+            let link = Conn(entry)
             switch family {
             case .accessoryCircular:
                 Gauge(value: s.stateOfCharge) {
-                    Image(systemName: s.isCharging ? "bolt.fill" : "car.fill")
+                    Image(systemName: link == .ok ? (s.isCharging ? "bolt.fill" : "car.fill") : link.symbol)
                 } currentValueLabel: {
                     Text("\(percent(s))")
                 }
                 .gaugeStyle(.accessoryCircularCapacity)
             case .accessoryRectangular:
                 VStack(alignment: .leading, spacing: 1) {
-                    Label("ID.3 \(percent(s)) %", systemImage: s.isCharging ? "bolt.fill" : "car.fill")
-                        .font(.headline)
-                    Text(s.rangeKm.map { "\(Int($0.rounded())) km · \(statusText(s))" } ?? statusText(s))
-                        .font(.caption)
-                    ageText(s).font(.caption2).foregroundStyle(.secondary)
+                    HStack(spacing: 4) {
+                        Label("ID.3 \(percent(s)) %", systemImage: s.isCharging ? "bolt.fill" : "car.fill").font(.headline)
+                        if link != .ok { Image(systemName: link.symbol) }
+                    }
+                    Text(s.rangeKm.map { "\(Int($0.rounded())) km · \(statusText(s))" } ?? statusText(s)).font(.caption)
+                    ageText(s.measuredAt).font(.caption2).foregroundStyle(.secondary)
                 }
             case .accessoryInline:
-                Text("ID.3 \(percent(s)) %" + (s.rangeKm.map { " · \(Int($0.rounded())) km" } ?? ""))
+                Text("ID.3 \(percent(s)) %" + (s.rangeKm.map { " · \(Int($0.rounded())) km" } ?? "") + (link == .ok ? "" : " · \(link.short)"))
             case .systemMedium:
-                HStack(spacing: 16) {
-                    Ring(state: s).frame(width: 96, height: 96)
-                    VStack(alignment: .leading, spacing: 4) {
-                        if let r = s.rangeKm {
-                            Text("\(Int(r.rounded())) km").font(.system(.title2, design: .rounded).bold()).monospacedDigit()
+                HStack(spacing: 14) {
+                    Ring(state: s).frame(width: 92, height: 92)
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack {
+                            if let r = s.rangeKm {
+                                Text("\(Int(r.rounded())) km").font(.system(.title3, design: .rounded).bold()).monospacedDigit()
+                            }
+                            Spacer(minLength: 4)
+                            LinkBadge(link: link)
                         }
-                        Text(statusText(s)).font(.callout).foregroundStyle(s.isCharging ? .yellow : .secondary)
-                        if let k = s.model?.consumptionKwhPer100 {
-                            Text("Maps: \(k.formatted(.number.precision(.fractionLength(1)).locale(Locale(identifier: "da_DK")))) kWh/100 km")
-                                .font(.caption).foregroundStyle(.secondary)
+                        Text(statusText(s)).font(.caption).foregroundStyle(s.isCharging ? .yellow : .secondary)
+                        if let m = s.model, let city = binValue(m, 2), let mw = binValue(m, 6) {
+                            Text("Maps: by \(num(city, 0)) · motorvej \(num(mw, 0)) kWh").font(.caption2).foregroundStyle(.secondary)
                         }
-                        ageText(s).font(.caption2).foregroundStyle(.tertiary)
+                        if let t = s.model?.temperatureC {
+                            Text("\(num(t, 0)) °C · \(s.model?.batteryWarm == true ? "varmt" : "koldt") batteri").font(.caption2).foregroundStyle(.secondary)
+                        }
+                        ageText(s.measuredAt).font(.caption2).foregroundStyle(.tertiary)
                     }
-                    Spacer(minLength: 0)
                 }
+            case .systemLarge:
+                large(s, link)
             default:
-                VStack(spacing: 6) {
-                    Ring(state: s).frame(width: 84, height: 84)
+                VStack(spacing: 4) {
+                    HStack { Spacer(); LinkBadge(link: link, showText: false) }
+                    Ring(state: s).frame(width: 78, height: 78)
                     if let r = s.rangeKm {
                         Text("\(Int(r.rounded())) km").font(.caption.bold()).monospacedDigit()
                     }
-                    ageText(s).font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.7)
+                    ageText(s.measuredAt).font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.7)
                 }
             }
         } else {
@@ -154,6 +224,70 @@ struct BatteryWidgetView: View {
             }
         }
     }
+
+    /// Everything the Worker knows, on one widget.
+    private func large(_ s: VehicleState, _ link: Conn) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 14) {
+                Ring(state: s, lineWidth: 11).frame(width: 104, height: 104)
+                VStack(alignment: .leading, spacing: 3) {
+                    if let r = s.rangeKm {
+                        Text("\(Int(r.rounded())) km").font(.system(.title2, design: .rounded).bold()).monospacedDigit()
+                        Text("rækkevidde ifølge bilen").font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Text(statusText(s)).font(.callout.weight(.semibold)).foregroundStyle(s.isCharging ? .yellow : .primary)
+                    if s.socEstimated == true {
+                        Text("procent fremskrevet under kørsel").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+
+            if let m = s.model {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Maps regner med (kWh/100 km)").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                    HStack(spacing: 0) {
+                        speedTile("by 50", binValue(m, 2))
+                        speedTile("landevej 90", binValue(m, 4))
+                        speedTile("motorvej 130", binValue(m, 6))
+                    }
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    if let c = m.tripCalibration {
+                        Row(symbol: "dial.medium", text: "Kalibrering ×\(num(c.factor, 2)) · \(c.n) ture, \(num(c.km, 0)) km")
+                    }
+                    if let t = m.temperatureC {
+                        Row(symbol: m.batteryWarm == true ? "thermometer.sun.fill" : "snowflake",
+                            text: "\(num(t, 0)) °C ude · \(m.batteryWarm == true ? "varmt" : "koldt") batteri",
+                            tint: m.batteryWarm == true ? .orange : .cyan)
+                    }
+                    if let a = m.auxPowerW {
+                        Row(symbol: "heater.vertical", text: "Varme m.m. \(num(a / 1000)) kW")
+                    }
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 6) {
+                LinkBadge(link: link)
+                Spacer(minLength: 4)
+                switch link {
+                case .ok: (Text("bil målt ") + ageText(s.measuredAt)).font(.caption2).foregroundStyle(.secondary)
+                case .offline: (Text("sidst kendte, hentet ") + ageText(s.contactAt ?? s.measuredAt)).font(.caption2).foregroundStyle(.secondary)
+                case .vwError: Text("viser sidste måling").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func speedTile(_ label: String, _ value: Double?) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(value.map { num($0, 0) } ?? "–").font(.system(.title3, design: .rounded).bold()).monospacedDigit()
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 }
 
 struct BatteryWidget: Widget {
@@ -162,8 +296,8 @@ struct BatteryWidget: Widget {
             BatteryWidgetView(entry: entry)
         }
         .configurationDisplayName("ID.3 batteri")
-        .description("Batteriprocent, rækkevidde og ladning.")
-        .supportedFamilies([.systemSmall, .systemMedium, .accessoryCircular, .accessoryRectangular, .accessoryInline])
+        .description("Batteri, rækkevidde, ladning, forbrug og forbindelse.")
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge, .accessoryCircular, .accessoryRectangular, .accessoryInline])
     }
 }
 
