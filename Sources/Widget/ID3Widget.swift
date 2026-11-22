@@ -86,9 +86,22 @@ private func binValue(_ m: ModelHints, _ i: Int) -> Double? {
     return bins[i] + (m.auxPowerW ?? 500) / 1000 / mids[i] * 100
 }
 
-/// "for 3 min. siden", updated by the system without reloading the widget.
+/// "kl. 20.58" (today) or "21/11 20.58": short and still, no ticking seconds.
 private func ageText(_ d: Date) -> Text {
-    Text("for ") + Text(d, style: .relative) + Text(" siden")
+    let time = d.formatted(.dateTime.hour().minute().locale(dk))
+    if Calendar.current.isDateInToday(d) { return Text("kl. \(time)") }
+    return Text(d.formatted(.dateTime.day().month(.defaultDigits).locale(dk)) + " " + time)
+}
+
+/// One short line under the ring: charging details, else range.
+private func smallLine(_ s: VehicleState) -> String {
+    if s.isCharging {
+        var parts: [String] = []
+        if let w = s.chargePowerW { parts.append("\(Int((w / 1000).rounded())) kW") }
+        if let m = s.minutesToFull { parts.append("\(m) min") }
+        return parts.isEmpty ? "Lader" : parts.joined(separator: " · ")
+    }
+    return s.rangeKm.map { "\(Int($0.rounded())) km" } ?? ""
 }
 
 private enum Conn {
@@ -208,13 +221,19 @@ struct BatteryWidgetView: View {
             case .systemLarge:
                 large(s, link)
             default:
-                VStack(spacing: 4) {
-                    HStack { Spacer(); LinkBadge(link: link, showText: false) }
-                    Ring(state: s).frame(width: 78, height: 78)
-                    if let r = s.rangeKm {
-                        Text("\(Int(r.rounded())) km").font(.caption.bold()).monospacedDigit()
+                // Small (also the CarPlay widget): one glance, nothing that ticks.
+                VStack(spacing: 6) {
+                    HStack(spacing: 4) {
+                        Text("ID.3").font(.caption.weight(.bold)).foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                        ageText(s.measuredAt).font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+                        Image(systemName: link.symbol).font(.caption2).foregroundStyle(link.color)
                     }
-                    ageText(s.measuredAt).font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.7)
+                    Ring(state: s, lineWidth: 10).frame(maxWidth: .infinity, maxHeight: .infinity)
+                    Text(smallLine(s))
+                        .font(.system(.subheadline, design: .rounded).bold()).monospacedDigit()
+                        .foregroundStyle(s.isCharging ? .yellow : .primary)
+                        .lineLimit(1).minimumScaleFactor(0.8)
                 }
             }
         } else {
