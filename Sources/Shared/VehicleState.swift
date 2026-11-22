@@ -28,6 +28,10 @@ struct VehicleState: Sendable, Codable {
     var chargePowerW: Double? = nil
     /// This charging session's measurements (for the live chart in the app).
     var chargeSamples: [ChargeSample]? = nil
+    /// When the Worker last answered (we are in contact even if VW's value is minutes old).
+    var contactAt: Date? = nil
+    /// True when `stateOfCharge` is projected forward from VW's last value during a drive.
+    var socEstimated: Bool? = nil
 }
 
 /// One measurement of the current charging session.

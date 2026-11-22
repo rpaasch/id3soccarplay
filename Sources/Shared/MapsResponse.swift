@@ -66,9 +66,10 @@ enum MapsPowerResponse {
         response.carIdentifier = carId.uuidString
         response.chargePercentRemaining = Float(state.stateOfCharge)
 
-        // Timestamp of the last real measurement.
+        // When we last heard from the car's data (the Worker). VW's own timestamp can be minutes
+        // old while driving; reporting that made Maps say the connection to the car was lost.
         response.dateOfLastStateUpdate = Calendar.current.dateComponents(
-            [.year, .month, .day, .hour, .minute, .second], from: state.measuredAt
+            [.year, .month, .day, .hour, .minute, .second], from: state.contactAt ?? state.measuredAt
         )
 
         // The two undocumented dictionaries that make routing work.

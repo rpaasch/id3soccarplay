@@ -1543,6 +1543,25 @@ async function buildModel(env, snap, ctx) {
   return model;
 }
 
+// While driving, VW reports the SoC only every 2-8 min. Between reports, project it forward with
+// this drive's own drop rate, so Maps is not left on a value that is minutes old (it then shows
+// "connection lost"). Conservative: only during an open trip, 1-15 min after the last report,
+// and never more than 3 pp below it.
+async function estimateSocNow(env, snap) {
+  if (snap.charging === true || typeof snap.soc !== "number" || typeof snap.measuredAt !== "number") return null;
+  const age = Date.now() - snap.measuredAt;
+  if (age < 60e3 || age > 15 * 60e3) return null;
+  const trip = await kvJsonCached(env, "trip_current", 30);
+  if (!trip || trip.endAt) return null;
+  const log = (await kvJsonCached(env, "measure_log", 30)) || [];
+  const recent = log.filter((e) => e.ch !== true && typeof e.soc === "number" && e.t <= snap.measuredAt && snap.measuredAt - e.t <= 20 * 60e3);
+  const first = recent[0];
+  if (!first || snap.measuredAt - first.t < 5 * 60e3) return null;
+  const rate = (first.soc - snap.soc) / (snap.measuredAt - first.t); // per ms
+  if (!(rate > 0)) return null;
+  return Math.round((snap.soc - Math.min(0.03, rate * age)) * 1000) / 1000;
+}
+
 async function statusEndpoint(request, env, ctx) {
   const url = new URL(request.url);
   const token = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || url.searchParams.get("token");
@@ -1585,6 +1604,7 @@ async function statusEndpoint(request, env, ctx) {
       if (typeof snap.wattageW !== "number" && last) snap = { ...snap, wattageW: Math.round(last.kw * 1000) };
     }
   }
-  return new Response(JSON.stringify({ available: true, ageSeconds: ageSec, lastError, kvWriteError, model, chargeSession, ...snap }),
+  const socEstimate = await estimateSocNow(env, snap);
+  return new Response(JSON.stringify({ available: true, ageSeconds: ageSec, lastError, kvWriteError, model, chargeSession, socEstimate, ...snap }),
     { headers: { "content-type": "application/json" } });
 }

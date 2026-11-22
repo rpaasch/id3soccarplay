@@ -128,18 +128,21 @@ private final class UpdateCoordinator: @unchecked Sendable {
 
     private func run(generation: Int) async {
         var lastPushed: VehicleState?
+        var lastPushAt = Date.distantPast
         while !Task.isCancelled {
             guard currentObserver(for: generation) != nil else { return } // superseded or stopped
             if let profile = try? VehicleProfile.load(),
                let current = await StateProvider.current(timeout: 6, background: true) {
                 let s = current.state
-                if PowerLevelHandler.shouldPush(new: s, last: lastPushed),
+                // Also a heartbeat every 2 min, so Maps keeps seeing a live connection.
+                if PowerLevelHandler.shouldPush(new: s, last: lastPushed) || Date().timeIntervalSince(lastPushAt) >= 120,
                    let target = currentObserver(for: generation) {
                     let adjusted = profile.adjusted(with: s.model)
                     target.value.didUpdate(getCarPowerLevelStatus: MapsPowerResponse.make(state: s, profile: adjusted.profile))
                     lastPushed = s
+                    lastPushAt = Date()
                     SharedLog.shared.log(
-                        "push -> SoC \(Int((s.stateOfCharge * 100).rounded()))% (\(current.origin.rawValue)); model: \(adjusted.note)",
+                        "push -> SoC \(Int((s.stateOfCharge * 100).rounded()))% (\(current.origin.rawValue)\(s.socEstimated == true ? ", estimated" : "")); model: \(adjusted.note)",
                         category: "power"
                     )
                 }

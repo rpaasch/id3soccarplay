@@ -29,6 +29,8 @@ private struct RemoteStatus: Decodable {
     /// Charging power in W (Smartcar), while charging.
     let wattageW: Double?
     let chargeSession: ChargeSessionDTO?
+    /// SoC projected to now while driving (VW reports only every few minutes).
+    let socEstimate: Double?
 }
 
 private struct ChargeSessionDTO: Decodable {
@@ -77,7 +79,7 @@ enum StatusClient {
             throw StatusError.unavailable(status.lastError)
         }
         return VehicleState(
-            stateOfCharge: soc,
+            stateOfCharge: status.socEstimate ?? soc,
             measuredAt: Date(timeIntervalSince1970: ms / 1000),
             isCharging: status.charging ?? false,
             rangeKm: status.rangeKm,
@@ -86,7 +88,9 @@ enum StatusClient {
             model: status.model,
             chargeKind: status.charging == true ? status.chargeKind : nil,
             chargePowerW: status.charging == true ? status.wattageW : nil,
-            chargeSamples: status.charging == true ? status.chargeSession?.samples : nil
+            chargeSamples: status.charging == true ? status.chargeSession?.samples : nil,
+            contactAt: Date(),
+            socEstimated: status.socEstimate != nil
         )
     }
 }
