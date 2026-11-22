@@ -20,8 +20,8 @@ struct ContentView: View {
     @State private var hasToken = SharedStore.string(.statusToken)?.isEmpty == false
     @State private var tokenInput = ""
     @State private var entries: [LogEntry] = []
-    @State private var exportURL: URL?
-    @State private var showShare = false
+    /// Set → the share sheet opens with exactly this file (sheet(item:) avoids the empty first sheet).
+    @State private var exportFile: ExportFile?
     @State private var siriStatus = "unknown"
     @State private var trips: [Trip] = []
     @State private var tripsNote = ""
@@ -43,9 +43,7 @@ struct ContentView: View {
         .tint(.teal)
         .onAppear { reload(); Task { await refreshLive() } }
         .task { await liveLoop() }
-        .sheet(isPresented: $showShare) {
-            if let url = exportURL { ShareSheet(items: [url]) }
-        }
+        .sheet(item: $exportFile) { file in ShareSheet(items: [file.url]) }
     }
 
     // MARK: Tabs
@@ -582,8 +580,7 @@ struct ContentView: View {
             .appendingPathComponent("id3maps-log-\(Int(Date().timeIntervalSince1970)).txt")
         do {
             try text.write(to: url, atomically: true, encoding: .utf8)
-            exportURL = url
-            showShare = true
+            exportFile = ExportFile(url: url)
         } catch {
             SharedLog.shared.log("export failed: \(error)", category: "app")
         }
@@ -603,6 +600,11 @@ private func siriStatusText(_ s: INSiriAuthorizationStatus) -> String {
 }
 
 /// UIKit share sheet bridge.
+struct ExportFile: Identifiable {
+    let url: URL
+    var id: URL { url }
+}
+
 struct ShareSheet: UIViewControllerRepresentable {
     let items: [Any]
     func makeUIViewController(context: Context) -> UIActivityViewController {
