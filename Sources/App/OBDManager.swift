@@ -20,6 +20,7 @@
 
 import Foundation
 import CoreBluetooth
+import WidgetKit
 
 /// A decoded value shown in the app.
 struct OBDDecoded: Sendable, Identifiable {
@@ -258,6 +259,8 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var scanHits = 0
     private var scanProgress: String?
     private var lastKeychainWrite = Date.distantPast
+    private var lastWidgetPct: Int?
+    private var lastWidgetReload = Date.distantPast
 
     private func statusLocked() -> Status {
         Status(state: state, device: peripheral?.name, lastRaw: lastRaw, lastSocPct: lastSocPct,
@@ -685,6 +688,14 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         if changed || Date().timeIntervalSince(lastKeychainWrite) >= 10 {
             SharedStore.setCodable(reading, for: .obdReading)
             lastKeychainWrite = Date()
+        }
+        // The widget (also in CarPlay) shows the live value: reload it on each new whole percent,
+        // at most once a minute (iOS limits widget reloads per day).
+        let whole = Int(pct.rounded())
+        if lastValidated, whole != lastWidgetPct, Date().timeIntervalSince(lastWidgetReload) >= 60 {
+            lastWidgetPct = whole
+            lastWidgetReload = Date()
+            WidgetCenter.shared.reloadAllTimelines()
         }
     }
 

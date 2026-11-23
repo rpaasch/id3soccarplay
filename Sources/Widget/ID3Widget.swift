@@ -54,9 +54,19 @@ struct BatteryProvider: AppIntentTimelineProvider {
         } catch {
             SharedLog.shared.log("widget refresh failed after \(Int(Date().timeIntervalSince(t0) * 1000)) ms: \((error as? URLError)?.code.rawValue ?? 0)", category: "widget")
         }
+        // While driving, the OBD dongle's live value (seconds old) beats VW's (2-15 min old).
+        var obd = false
+        if let r: OBDReading = SharedStore.codable(.obdReading), r.isFreshAndValid,
+           var s = state, r.at > s.measuredAt {
+            s.stateOfCharge = r.soc
+            s.measuredAt = r.at
+            s.obdLive = true
+            state = s
+            obd = true
+        }
         SharedLog.shared.flush()
-        // Retry sooner when offline or charging.
-        let minutes: Double = !online ? 15 : (state?.isCharging == true ? 10 : 30)
+        // Retry sooner when offline, charging or driving (the app also reloads on every percent).
+        let minutes: Double = obd ? 5 : (!online ? 15 : (state?.isCharging == true ? 10 : 30))
         return Timeline(entries: [BatteryEntry(date: .now, state: state, online: online)],
                         policy: .after(.now.addingTimeInterval(minutes * 60)))
     }
