@@ -119,13 +119,16 @@ enum StateProvider {
 
     /// Best available state: live from the Worker (or a < 15 s old live answer), else the last
     /// cached one, else nil. Background updates pass a longer timeout and retry on timeout.
-    /// Maps gets the projected SoC while driving (VW reports only every few minutes).
+    /// Maps gets the projected SoC while driving (VW reports only every few minutes), and never
+    /// a value that goes up again while not charging: when VW's next report is a little higher
+    /// than the projection, Maps keeps the lower value instead of jumping back (94 -> 95 on 23 Nov).
     private static func forMaps(_ s: VehicleState) -> VehicleState {
-        guard let e = s.socEstimate else { return s }
         var v = s
-        v.stateOfCharge = e
-        v.socEstimated = true
-        return v
+        if let e = s.socEstimate {
+            v.stateOfCharge = e
+            v.socEstimated = true
+        }
+        return MapsFloor.shared.apply(v)
     }
 
     static func current(timeout: TimeInterval = 2.5, background: Bool = false) async -> (state: VehicleState, origin: Origin)? {
@@ -142,5 +145,27 @@ enum StateProvider {
             }
             return nil
         }
+    }
+}
+
+/// Remembers the lowest SoC sent to Maps during the current drive.
+private final class MapsFloor: @unchecked Sendable {
+    static let shared = MapsFloor()
+    private let lock = NSLock()
+    private var last: (soc: Double, at: Date)?
+
+    func apply(_ s: VehicleState) -> VehicleState {
+        lock.lock()
+        defer { lock.unlock() }
+        // Charging, a real jump (> 2 pp, e.g. after charging) or a pause over 30 min starts afresh.
+        if s.isCharging || last == nil || Date().timeIntervalSince(last!.at) > 30 * 60
+            || s.stateOfCharge > last!.soc + 0.02 || s.stateOfCharge <= last!.soc {
+            last = (s.stateOfCharge, Date())
+            return s
+        }
+        var v = s
+        v.stateOfCharge = last!.soc
+        last = (last!.soc, Date())
+        return v
     }
 }

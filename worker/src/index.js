@@ -1593,14 +1593,14 @@ async function buildModel(env, snap, ctx) {
 
 // While driving, VW reports the SoC only every 2-8 min. Between reports, project it forward with
 // this drive's own drop rate, so Maps is not left on a value that is minutes old (it then shows
-// "connection lost"). Conservative: only during an open trip, 4-15 min after the last report,
+// "connection lost"). Conservative: only during an open trip, 2-15 min after the last report,
 // and never more than 3 pp below it.
 async function estimateSocNow(env, snap) {
   if (snap.charging === true || typeof snap.soc !== "number" || typeof snap.measuredAt !== "number") return null;
   const age = Date.now() - snap.measuredAt;
-  // Within VW's normal 2-4 min reporting rhythm the reported value is close enough; projecting
-  // earlier made Maps/widget show one percent below the dashboard (23 Nov: 95 vs 96).
-  if (age < 4 * 60e3 || age > 15 * 60e3) return null;
+  // Only Maps uses this (the app and widget show VW's value). 23 Nov: VW was 6 min / 2 pp behind
+  // the dashboard on arrival, so Maps said 53 % where the car would arrive with ~51 %.
+  if (age < 2 * 60e3 || age > 15 * 60e3) return null;
   const trip = await kvJsonCached(env, "trip_current", 30);
   if (!trip || trip.endAt) return null;
   const log = (await kvJsonCached(env, "measure_log", 30)) || [];
