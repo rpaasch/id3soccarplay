@@ -348,6 +348,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         carFails = 0
         voltMax = nil
         carOn = false
+        paused = true
         state = "forbundet, finder kanal…"
         log("OBD: connected \(p.name ?? "?")")
         p.discoverServices(nil)
@@ -426,7 +427,12 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         let toCar = !cmd.uppercased().hasPrefix("AT")
         // Nothing reaches the car's bus until the dongle's own 12 V reading shows the car is on.
         // …and only while the car is moving (also blocks manual tests/scans while parked).
-        guard !toCar || (carOn && movingNow) else { queue.async { self.sendNextLocked() }; return }
+        guard !toCar || (carOn && movingNow) else {
+            // A manual test/scan must not stall: report the skipped request and move on.
+            if diagRunning { handler?("SKIPPED (holder stille)") }
+            queue.async { self.sendNextLocked() }
+            return
+        }
         guard let p = peripheral, let w = writeChar else { return }
         waiting = cmd
         responseHandler = handler
@@ -538,7 +544,9 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                 self.send("22" + did) { reply in
                     let c = reply.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "\r", with: "")
                     if let r = c.range(of: "62" + did) { self.extras[did] = String(c[r.upperBound...].prefix(16)) }
-                    self.carAnswered(c.contains("62" + did) || c.contains("7F22"))
+                    // Only a success counts here (some extra values may be unsupported);
+                    // missing answers are judged on the main SoC poll.
+                    if c.contains("62" + did) || c.contains("7F22") { self.carAnswered(true) }
                 }
             } else {
                 self.send(Self.pollCommand) { reply in self.handlePoll(reply) }

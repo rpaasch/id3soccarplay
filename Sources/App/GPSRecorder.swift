@@ -50,6 +50,9 @@ final class GPSRecorder: NSObject, CLLocationManagerDelegate {
 
     private let manager = CLLocationManager()
     private var precise = false
+    /// CarPlay drive in progress (Start kørsel): keep precise GPS on through stops, so the OBD
+    /// dongle (which only reads the car while it moves) sees the car move again at once.
+    private var driveSince: Date?
     private var seg: GPSSegment?
     private var lastFix: Date?
     private var lastMoving: Date?
@@ -106,11 +109,13 @@ final class GPSRecorder: NSObject, CLLocationManagerDelegate {
         start()
         precise = true
         lastMoving = Date()
+        driveSince = Date()
         manager.startUpdatingLocation()
     }
 
     /// CarPlay disconnected: close the segment now, upload it, and let GPS sleep.
     func endDriveNow() async {
+        driveSince = nil
         finishSegment()
         manager.stopUpdatingLocation()
         precise = false
@@ -162,6 +167,9 @@ final class GPSRecorder: NSObject, CLLocationManagerDelegate {
         // Not driving any more (or never started): end the segment and let GPS sleep.
         if let lm = lastMoving, Date().timeIntervalSince(lm) > Self.idleEndSec {
             finishSegment()
+            // During a CarPlay drive (max 4 h, in case the end event was missed) GPS stays on.
+            if let d = driveSince, Date().timeIntervalSince(d) < 4 * 3600 { return }
+            driveSince = nil
             manager.stopUpdatingLocation()
             precise = false
         }
