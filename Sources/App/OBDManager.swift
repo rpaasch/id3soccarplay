@@ -81,6 +81,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             UserDefaults.standard.set(Date(), forKey: Self.driveKey)
             self.silentStop = false
             self.log("OBD: drive started, dongle allowed")
+            CarPlayRoute.shared.logState(reason: "Start kørsel", force: true)
             guard self.enabled else { return }
             if let p = self.peripheral, p.state != .connected { self.central?.connect(p) } else { self.startLocked() }
         }
@@ -89,6 +90,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     /// CarPlay disconnected ("Slut kørsel"): stop talking at once and drop the link, before the
     /// car can be locked. Talking to a locked car set off its alarm (21 Nov).
     func endDrive() {
+        CarPlayRoute.shared.logState(reason: "Slut kørsel", force: true)
         queue.sync {
             UserDefaults.standard.removeObject(forKey: Self.driveKey)
             self.disconnectLocked(reason: "drive ended")
@@ -523,6 +525,8 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             guard self.ready, self.waiting == nil, self.pending.isEmpty,
                   !self.diagRunning, self.scanQueue.isEmpty else { return }
             self.tick += 1
+            // Stage 1: only log whether iOS reports CarPlay while we would talk to the car.
+            CarPlayRoute.shared.logState(reason: "OBD poll")
             // Car never showed as on (12 V stayed low) within 60 s: give up until the next drive.
             if !self.carOn {
                 if Date().timeIntervalSince(self.connectedAt) > 60 {
