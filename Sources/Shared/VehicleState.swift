@@ -35,6 +35,8 @@ struct VehicleState: Sendable, Codable {
     /// The Worker's SoC projected to now while driving. Only Maps uses it; the app and the
     /// widget show the car's own reported value (so they match the dashboard).
     var socEstimate: Double? = nil
+    /// True when the SoC came live from the OBD dongle.
+    var obdLive: Bool? = nil
     /// The Worker's last error talking to VW/Smartcar (nil = fine).
     var workerError: String? = nil
 }

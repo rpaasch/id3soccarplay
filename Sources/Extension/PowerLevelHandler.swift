@@ -43,7 +43,7 @@ final class PowerLevelHandler: NSObject, INGetCarPowerLevelStatusIntentHandling,
         SharedLog.shared.log(
             "INGetCarPowerLevelStatus[handle] -> SoC \(Int((s.stateOfCharge * 100).rounded()))% "
                 + "(\(current.origin.rawValue), measured \(Int(Date().timeIntervalSince(s.measuredAt) / 60)) min ago, "
-                + "charging \(s.isCharging)\(s.socEstimated == true ? ", estimated" : "")) in \(Int(Date().timeIntervalSince(t0) * 1000)) ms; model: \(adjusted.note)",
+                + "charging \(s.isCharging)\(s.socEstimated == true ? ", estimated" : "")\(s.obdLive == true ? ", obd" : "")) in \(Int(Date().timeIntervalSince(t0) * 1000)) ms; model: \(adjusted.note)",
             category: "power"
         )
         return MapsPowerResponse.make(state: s, profile: adjusted.profile)
@@ -146,12 +146,14 @@ private final class UpdateCoordinator: @unchecked Sendable {
                     lastPushed = s
                     lastPushAt = Date()
                     SharedLog.shared.log(
-                        "push -> SoC \(Int((s.stateOfCharge * 100).rounded()))% (\(current.origin.rawValue)\(s.socEstimated == true ? ", estimated" : "")); model: \(adjusted.note)",
+                        "push -> SoC \(Int((s.stateOfCharge * 100).rounded()))% (\(s.obdLive == true ? "obd" : current.origin.rawValue)\(s.socEstimated == true ? ", estimated" : "")); model: \(adjusted.note)",
                         category: "power"
                     )
                 }
             }
-            try? await Task.sleep(for: .seconds(60))
+            // With the dongle live the SoC is seconds old: follow the car more closely.
+            let obdLive: Bool = (SharedStore.codable(.obdReading) as OBDReading?)?.isFreshAndValid ?? false
+            try? await Task.sleep(for: .seconds(obdLive ? 20 : 60))
         }
     }
 }

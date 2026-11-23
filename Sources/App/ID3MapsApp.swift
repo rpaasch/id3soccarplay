@@ -17,6 +17,7 @@ struct ID3MapsApp: App {
         SharedLog.shared.log("App launched (build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))", category: "app")
         // Also runs when iOS relaunches the app in the background for a significant location change.
         GPSRecorder.shared.start()
+        OBDManager.shared.start() // connects only during an active drive (CarPlay)
         Task { await DriveEvents.flush() } // events that could not be sent earlier
     }
 

@@ -7,6 +7,7 @@
 //  in the background without asking. They give exact trip boundaries, which VW's odometer (only
 //  every ~20 min) cannot:
 //   * GPS recording starts/stops immediately,
+//   * the OBD dongle may talk only between these two events (never to a parked or locked car),
 //   * the Worker is told, so the trip log starts/ends at the right moment.
 //
 
@@ -15,13 +16,14 @@ import Foundation
 
 struct StartDriveIntent: AppIntent {
     static let title: LocalizedStringResource = "Start kørsel"
-    static let description = IntentDescription("Starter GPS-målingen og fortæller Workeren, at en tur begynder. Brug den i en automatisering: Når CarPlay forbinder.")
+    static let description = IntentDescription("Starter GPS-måling og OBD og fortæller Workeren, at en tur begynder. Brug den i en automatisering: Når CarPlay forbinder.")
     static let openAppWhenRun = false
 
     @MainActor
     func perform() async throws -> some IntentResult {
         SharedLog.shared.log("Drive start (Shortcuts/CarPlay)", category: "drive")
         GPSRecorder.shared.beginDriveNow()
+        OBDManager.shared.beginDrive()
         await DriveEvents.send("start")
         return .result()
     }
@@ -35,6 +37,7 @@ struct EndDriveIntent: AppIntent {
     @MainActor
     func perform() async throws -> some IntentResult {
         SharedLog.shared.log("Drive end (Shortcuts/CarPlay)", category: "drive")
+        OBDManager.shared.endDrive() // first: stop talking to the car before it can be locked
         await DriveEvents.send("end")
         await GPSRecorder.shared.endDriveNow()
         return .result()

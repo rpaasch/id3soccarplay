@@ -426,6 +426,7 @@ struct ContentView: View {
     private var moreTab: some View {
         List {
             gpsSection
+            obdSection
             connectionSection
             actionSection
             Section {
@@ -438,6 +439,34 @@ struct ContentView: View {
             }
         }
         .refreshable { reload(); await Task { await refreshLive() }.value } // own task: SwiftUI cancels the refresh task when the view redraws
+    }
+
+    @State private var obdOn = OBDManager.shared.enabled
+    @State private var obd = OBDManager.shared.status()
+
+    private var obdSection: some View {
+        Section {
+            Toggle("Brug OBD-dongle", isOn: $obdOn)
+                .onChange(of: obdOn) { _, on in
+                    OBDManager.shared.enabled = on
+                    obd = OBDManager.shared.status()
+                }
+            if obdOn {
+                row("Status", obd.state)
+                if let d = obd.device { row("Dongle", d) }
+                if let p = obd.lastSocPct { row("Batteri (live)", DK.num(p) + " %") }
+                row("Kontrolleret mod VW", obd.validated ? "ja" : "ikke endnu")
+                ForEach(obd.decoded) { d in row(d.label, d.value) }
+                if let v = obd.volt12 { row("12 V-batteri", v) }
+                if let t = obd.lastAnswer { row("Sidste svar", t.formatted(date: .omitted, time: .standard)) }
+                if let c = obd.calibration { Text("Kalibrering: \(c)").font(.caption).foregroundStyle(.secondary) }
+                Button("Opdater") { obd = OBDManager.shared.status() }
+            }
+        } header: {
+            Text("OBD-dongle")
+        } footer: {
+            Text("Donglen taler kun med bilen, mens CarPlay er forbundet (genvejene Start/Slut kørsel). Når CarPlay afbryder, stopper den med det samme, så den aldrig taler med en låst bil. Svarer bilen ikke i 20 sekunder, holder den pause til næste tur. Den kan kun læse, aldrig ændre noget.")
+        }
     }
 
     private var gpsSection: some View {

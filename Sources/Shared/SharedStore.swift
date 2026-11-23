@@ -14,6 +14,8 @@ enum SharedStore {
     enum Key: String {
         case statusToken = "status-token"
         case lastState = "last-state"
+        /// Latest SoC read directly from the car via the Bluetooth OBD dongle (OBDReading).
+        case obdReading = "obd-reading"
     }
 
     private static let service = "com.porsche.one.store"

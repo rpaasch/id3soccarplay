@@ -124,7 +124,13 @@ enum StateProvider {
     /// than the projection, Maps keeps the lower value instead of jumping back (94 -> 95 on 23 Nov).
     private static func forMaps(_ s: VehicleState) -> VehicleState {
         var v = s
-        if let e = s.socEstimate {
+        if let r: OBDReading = SharedStore.codable(.obdReading), r.isFreshAndValid, r.at > s.measuredAt {
+            // Live from the car via the dongle (seconds old) beats any projection.
+            v.stateOfCharge = r.soc
+            v.measuredAt = r.at
+            v.socEstimated = false
+            v.obdLive = true
+        } else if let e = s.socEstimate {
             v.stateOfCharge = e
             v.socEstimated = true
         }
