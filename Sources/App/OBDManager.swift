@@ -102,6 +102,44 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         return Date().timeIntervalSince(d) < 4 * 3600
     }
 
+    /// Ends the drive for good (persisted), so neither a timer, a reconnect nor an iOS relaunch
+    /// can talk to the car again before the next "Start kørsel".
+    private func stopDriveLocked(reason: String) {
+        UserDefaults.standard.removeObject(forKey: Self.driveKey)
+        silentStop = true
+        log("OBD: stopped until next drive (\(reason))")
+        disconnectLocked(reason: reason)
+    }
+
+    /// Car on = the DC/DC converter charges the 12 V battery (about 14 V). Parked = about 12.x V.
+    /// ATRV is answered by the dongle itself and puts nothing on the car's bus.
+    static let carOnVolts = 13.0
+
+    private func handleVolts(_ reply: String) {
+        let digits = reply.filter { $0.isNumber || $0 == "." }
+        guard let v = Double(digits), v > 5, v < 20 else { return }
+        voltMax = max(voltMax ?? v, v)
+        if !carOn {
+            if v >= Self.carOnVolts {
+                carOn = true
+                log(String(format: "OBD: 12 V %.1f V – car is on, reading allowed", v))
+            } else {
+                log(String(format: "OBD: 12 V %.1f V – car not on, waiting", v))
+            }
+            return
+        }
+        // The converter stopped: the car was switched off. Stop before it can be locked.
+        if let m = voltMax, v < Self.carOnVolts, v <= m - 0.8 {
+            stopDriveLocked(reason: String(format: "12 V fell from %.1f to %.1f V – car off", m, v))
+        }
+    }
+
+    private func carAnswered(_ ok: Bool) {
+        if ok { carFails = 0; return }
+        carFails += 1
+        if carFails >= 2 { stopDriveLocked(reason: "no answer from the car twice in a row") }
+    }
+
     private func disconnectLocked(reason: String) {
         timer?.cancel(); timer = nil
         central?.stopScan()
@@ -182,6 +220,11 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var connectedAt = Date()
     /// Set when the car went silent during a drive: no reconnect until the next drive start.
     private var silentStop = false
+    /// Car requests ("22…") in a row that got no valid answer. Two in a row ends the drive.
+    private var carFails = 0
+    /// Highest 12 V reading (dongle-local ATRV) since connecting, and whether it showed the car on.
+    private var voltMax: Double?
+    private var carOn = false
     private var scanQueue: [String] = []
     private var scanTotal = 0
     private var scanHits = 0
@@ -283,6 +326,9 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         UserDefaults.standard.set(p.identifier.uuidString, forKey: Self.deviceKey)
         connectedAt = Date()
         lastAnswer = nil
+        carFails = 0
+        voltMax = nil
+        carOn = false
         state = "forbundet, finder kanal…"
         log("OBD: connected \(p.name ?? "?")")
         p.discoverServices(nil)
@@ -339,7 +385,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         responseHandler = nil
         waiting = nil
         if cmd == "ATI" { firmware = reply }
-        if cmd == "ATRV" { volt12 = reply }
+        if cmd == "ATRV" { volt12 = reply; handleVolts(reply) }
         handler?(reply)
         sendNextLocked()
     }
@@ -357,7 +403,10 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private func send(_ cmd: String, then handler: ((String) -> Void)? = nil) {
         guard Self.isAllowed(cmd) else { log("OBD: blocked non-read command \(cmd)"); return }
         // Last line of defence: nothing goes to the car outside an active drive.
-        guard driveActive else { disconnectLocked(reason: "no drive active"); return }
+        guard driveActive, !silentStop else { disconnectLocked(reason: "no drive active"); return }
+        let toCar = !cmd.uppercased().hasPrefix("AT")
+        // Nothing reaches the car's bus until the dongle's own 12 V reading shows the car is on.
+        guard !toCar || carOn else { queue.async { self.sendNextLocked() }; return }
         guard let p = peripheral, let w = writeChar else { return }
         waiting = cmd
         responseHandler = handler
@@ -367,6 +416,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         queue.asyncAfter(deadline: .now() + 4) { [weak self] in
             guard let self, self.waiting == cmd else { return }
             self.waiting = nil; self.responseHandler = nil; self.rxBuffer = ""
+            if toCar { self.carAnswered(false) }
             self.sendNextLocked()
         }
     }
@@ -440,19 +490,28 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             guard self.ready, self.waiting == nil, self.pending.isEmpty,
                   !self.diagRunning, self.scanQueue.isEmpty else { return }
             self.tick += 1
-            // Car off (no good answer for 20 s): stop and stay quiet until the next drive start.
-            if Date().timeIntervalSince(self.lastAnswer ?? self.connectedAt) > 20 {
-                self.silentStop = true
-                self.disconnectLocked(reason: "car silent for 20 s")
+            // Car never showed as on (12 V stayed low) within 60 s: give up until the next drive.
+            if !self.carOn {
+                if Date().timeIntervalSince(self.connectedAt) > 60 {
+                    self.stopDriveLocked(reason: "12 V never showed the car on")
+                } else {
+                    self.send("ATRV")
+                }
                 return
             }
-            if self.tick % 12 == 0 {                    // every ~60 s: the car's 12 V battery
+            // Car off (no good answer for 20 s): stop and stay quiet until the next drive start.
+            if Date().timeIntervalSince(self.lastAnswer ?? self.connectedAt) > 20 {
+                self.stopDriveLocked(reason: "car silent for 20 s")
+                return
+            }
+            if self.tick % 3 == 0 {                     // every ~15 s: 12 V (dongle only) – detects switch-off
                 self.send("ATRV")
-            } else if self.tick % 3 == 0 {              // every ~15 s: one extra battery value, in turn
-                let did = Self.extraDIDs[(self.tick / 3) % Self.extraDIDs.count]
+            } else if self.tick % 6 == 1 {              // every ~30 s: one extra battery value, in turn
+                let did = Self.extraDIDs[(self.tick / 6) % Self.extraDIDs.count]
                 self.send("22" + did) { reply in
                     let c = reply.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "\r", with: "")
                     if let r = c.range(of: "62" + did) { self.extras[did] = String(c[r.upperBound...].prefix(16)) }
+                    self.carAnswered(c.contains("62" + did) || c.contains("7F22"))
                 }
             } else {
                 self.send(Self.pollCommand) { reply in self.handlePoll(reply) }
@@ -543,6 +602,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         let compact = reply.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "\r", with: "")
         lastRaw = String(compact.prefix(40))
         guard let r = compact.range(of: Self.pollMarker) else {
+            carAnswered(false)
             failCount += 1
             state = "intet svar fra batteriet (\(compact.prefix(16)))"
             return
@@ -550,6 +610,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         let hex = compact[r.upperBound...].prefix(2)
         guard hex.count == 2, let byte = UInt8(hex, radix: 16) else { failCount += 1; return }
         okCount += 1
+        carAnswered(true)
         lastAnswer = Date()
         let bms = Double(byte) / 2.5
         bmsPct = bms
