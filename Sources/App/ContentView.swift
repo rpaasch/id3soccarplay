@@ -70,8 +70,9 @@ struct ContentView: View {
                                 Text("\(Int(r.rounded())) km").font(.system(.title, design: .rounded).bold()).monospacedDigit()
                                 Text("rækkevidde ifølge bilen").font(.caption).foregroundStyle(.secondary)
                             }
-                            Label(ageText(s.measuredAt), systemImage: "clock")
-                                .font(.caption2).foregroundStyle(.tertiary).padding(.top, 6)
+                            Label(measuredText(s.measuredAt), systemImage: "clock")
+                                .font(.caption).foregroundStyle(.secondary).padding(.top, 6)
+                                .lineLimit(1).minimumScaleFactor(0.8)
                         }
                         Spacer(minLength: 0)
                     }
@@ -504,6 +505,15 @@ struct ContentView: View {
             if Task.isCancelled { return }
             await Task { await refreshLive() }.value
         }
+    }
+
+    /// "målt kl. 05.13", "målt i går kl. 21.40" or "målt 21/11 kl. 21.40": short enough for one line.
+    private func measuredText(_ d: Date) -> String {
+        let time = d.formatted(.dateTime.hour().minute().locale(DK.locale))
+        let cal = Calendar.current
+        if cal.isDateInToday(d) { return "målt kl. \(time)" }
+        if cal.isDateInYesterday(d) { return "målt i går kl. \(time)" }
+        return "målt \(d.formatted(.dateTime.day().month(.defaultDigits).locale(DK.locale))) kl. \(time)"
     }
 
     private func ageText(_ d: Date) -> String {
