@@ -29,12 +29,13 @@ final class PowerLevelHandler: NSObject, INGetCarPowerLevelStatusIntentHandling,
     // MARK: One-shot query
 
     func handle(intent: INGetCarPowerLevelStatusIntent) async -> INGetCarPowerLevelStatusIntentResponse {
+        let t0 = Date()
         guard let profile = try? VehicleProfile.load() else {
             SharedLog.shared.log("power status failed: id3.json missing", category: "power")
             return INGetCarPowerLevelStatusIntentResponse(code: .failure, userActivity: nil)
         }
         guard let current = await StateProvider.current() else {
-            SharedLog.shared.log("INGetCarPowerLevelStatus[handle] -> FAILURE (no live or cached data)", category: "power")
+            SharedLog.shared.log("INGetCarPowerLevelStatus[handle] -> FAILURE (no live or cached data) after \(Int(Date().timeIntervalSince(t0) * 1000)) ms, net: \(NetworkLog.shared.summary)", category: "power")
             return INGetCarPowerLevelStatusIntentResponse(code: .failure, userActivity: nil)
         }
         let s = current.state
@@ -42,7 +43,7 @@ final class PowerLevelHandler: NSObject, INGetCarPowerLevelStatusIntentHandling,
         SharedLog.shared.log(
             "INGetCarPowerLevelStatus[handle] -> SoC \(Int((s.stateOfCharge * 100).rounded()))% "
                 + "(\(current.origin.rawValue), measured \(Int(Date().timeIntervalSince(s.measuredAt) / 60)) min ago, "
-                + "charging \(s.isCharging)); model: \(adjusted.note)",
+                + "charging \(s.isCharging)\(s.socEstimated == true ? ", estimated" : "")) in \(Int(Date().timeIntervalSince(t0) * 1000)) ms; model: \(adjusted.note)",
             category: "power"
         )
         return MapsPowerResponse.make(state: s, profile: adjusted.profile)
@@ -131,8 +132,11 @@ private final class UpdateCoordinator: @unchecked Sendable {
         var lastPushAt = Date.distantPast
         while !Task.isCancelled {
             guard currentObserver(for: generation) != nil else { return } // superseded or stopped
-            if let profile = try? VehicleProfile.load(),
-               let current = await StateProvider.current(timeout: 6, background: true) {
+            let current = await StateProvider.current(timeout: 6, background: true)
+            if current == nil {
+                SharedLog.shared.log("update loop: no live or cached data (net: \(NetworkLog.shared.summary))", category: "power")
+            }
+            if let profile = try? VehicleProfile.load(), let current {
                 let s = current.state
                 // Also a heartbeat every 2 min, so Maps keeps seeing a live connection.
                 if PowerLevelHandler.shouldPush(new: s, last: lastPushed) || Date().timeIntervalSince(lastPushAt) >= 120,

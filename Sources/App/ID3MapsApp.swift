@@ -10,7 +10,10 @@ import SwiftUI
 
 @main
 struct ID3MapsApp: App {
+    @Environment(\.scenePhase) private var scenePhase
+
     init() {
+        NetworkLog.shared.start()
         SharedLog.shared.log("App launched (build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))", category: "app")
         // Also runs when iOS relaunches the app in the background for a significant location change.
         GPSRecorder.shared.start()
@@ -20,6 +23,11 @@ struct ID3MapsApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            let name = switch phase { case .active: "active"; case .inactive: "inactive"; case .background: "background"; @unknown default: "?" }
+            SharedLog.shared.log("app \(name)", category: "app")
+            if phase == .background { SharedLog.shared.flush() }
         }
     }
 }

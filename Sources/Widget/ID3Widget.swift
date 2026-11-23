@@ -44,11 +44,17 @@ struct BatteryProvider: AppIntentTimelineProvider {
     func timeline(for configuration: BatteryWidgetIntent, in context: Context) async -> Timeline<BatteryEntry> {
         var state: VehicleState? = SharedStore.codable(.lastState)
         var online = false
-        if let fresh = try? await StatusClient.fetch(timeout: 10, retryOnTimeout: true) {
+        let t0 = Date()
+        do {
+            let fresh = try await StatusClient.fetch(timeout: 10, retryOnTimeout: true)
             state = fresh
             online = true
             SharedStore.setCodable(fresh, for: .lastState)
+            SharedLog.shared.log("widget refresh ok in \(Int(Date().timeIntervalSince(t0) * 1000)) ms", category: "widget")
+        } catch {
+            SharedLog.shared.log("widget refresh failed after \(Int(Date().timeIntervalSince(t0) * 1000)) ms: \((error as? URLError)?.code.rawValue ?? 0)", category: "widget")
         }
+        SharedLog.shared.flush()
         // Retry sooner when offline or charging.
         let minutes: Double = !online ? 15 : (state?.isCharging == true ? 10 : 30)
         return Timeline(entries: [BatteryEntry(date: .now, state: state, online: online)],
