@@ -536,6 +536,13 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             if !self.movingNow {
                 if !self.paused { self.paused = true; self.state = "holder stille – læser ikke bilen"; self.log("OBD: standing still, car requests paused") }
                 if self.tick % 3 == 0 { self.send("ATRV") }
+                // Standing still the SoC does not move, so the last live value stays true. Re-stamp
+                // it (up to 10 min after the last real answer) so Maps doesn't fall back to the
+                // 2-5 min old cloud value at every red light. Paused anyway on a switch-off (12 V).
+                if self.tick % 3 == 1, self.lastValidated, let pct = self.lastSocPct,
+                   let a = self.lastAnswer, Date().timeIntervalSince(a) < 10 * 60 {
+                    SharedStore.setCodable(OBDReading(soc: pct / 100, at: Date(), validated: true), for: .obdReading)
+                }
                 return
             }
             if self.paused { self.paused = false; self.resumedAt = Date(); self.log("OBD: moving, car requests resumed") }
