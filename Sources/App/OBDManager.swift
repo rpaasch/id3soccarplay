@@ -225,6 +225,25 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     /// Highest 12 V reading (dongle-local ATRV) since connecting, and whether it showed the car on.
     private var voltMax: Double?
     private var carOn = false
+    /// GPS: last fix and last fix at driving speed. Car requests only go out while the car moves,
+    /// so nothing is on the bus when you stop, get out and lock (the car can't be locked while moving).
+    private var lastFixAt: Date?
+    private var lastMovingAt: Date?
+    private var paused = true
+    private var resumedAt = Date()
+
+    /// Called by GPSRecorder for every fix (any thread).
+    func noteGPS(speed: Double, valid: Bool, at t: Date) {
+        queue.async {
+            self.lastFixAt = t
+            if valid && speed >= 1.5 { self.lastMovingAt = t }   // ~5 km/h
+        }
+    }
+
+    private var movingNow: Bool {
+        guard let f = lastFixAt, let m = lastMovingAt else { return false }
+        return Date().timeIntervalSince(f) < 10 && Date().timeIntervalSince(m) < 3
+    }
     private var scanQueue: [String] = []
     private var scanTotal = 0
     private var scanHits = 0
@@ -406,7 +425,8 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         guard driveActive, !silentStop else { disconnectLocked(reason: "no drive active"); return }
         let toCar = !cmd.uppercased().hasPrefix("AT")
         // Nothing reaches the car's bus until the dongle's own 12 V reading shows the car is on.
-        guard !toCar || carOn else { queue.async { self.sendNextLocked() }; return }
+        // …and only while the car is moving (also blocks manual tests/scans while parked).
+        guard !toCar || (carOn && movingNow) else { queue.async { self.sendNextLocked() }; return }
         guard let p = peripheral, let w = writeChar else { return }
         waiting = cmd
         responseHandler = handler
@@ -499,8 +519,15 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                 }
                 return
             }
-            // Car off (no good answer for 20 s): stop and stay quiet until the next drive start.
-            if Date().timeIntervalSince(self.lastAnswer ?? self.connectedAt) > 20 {
+            // Standing still (or no GPS): no car requests, only the dongle's own 12 V check.
+            if !self.movingNow {
+                if !self.paused { self.paused = true; self.state = "holder stille – læser ikke bilen"; self.log("OBD: standing still, car requests paused") }
+                if self.tick % 3 == 0 { self.send("ATRV") }
+                return
+            }
+            if self.paused { self.paused = false; self.resumedAt = Date(); self.log("OBD: moving, car requests resumed") }
+            // Car off (no good answer for 20 s of driving): stop and stay quiet until the next drive.
+            if Date().timeIntervalSince(max(self.lastAnswer ?? self.connectedAt, self.resumedAt)) > 20 {
                 self.stopDriveLocked(reason: "car silent for 20 s")
                 return
             }

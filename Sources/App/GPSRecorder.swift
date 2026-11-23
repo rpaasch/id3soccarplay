@@ -127,6 +127,9 @@ final class GPSRecorder: NSObject, CLLocationManagerDelegate {
     // MARK: CLLocationManagerDelegate (called off the main actor)
 
     nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        for l in locations {
+            OBDManager.shared.noteGPS(speed: l.speed, valid: l.speed >= 0 && (l.speedAccuracy < 0 || l.speedAccuracy < 3), at: l.timestamp)
+        }
         let fixes = locations.map {
             Fix(t: $0.timestamp, speed: $0.speed, speedAcc: $0.speedAccuracy, alt: $0.altitude, vAcc: $0.verticalAccuracy)
         }

@@ -465,7 +465,7 @@ struct ContentView: View {
         } header: {
             Text("OBD-dongle")
         } footer: {
-            Text("Donglen taler kun med bilen, mens CarPlay er forbundet (genvejene Start/Slut kørsel). Når CarPlay afbryder, stopper den med det samme, så den aldrig taler med en låst bil. Den spørger først bilen, når donglens egen 12 V-måling viser, at bilen er tændt (over 13 V). Den stopper til næste tur, hvis spændingen falder (bilen slukkes), eller hvis bilen ikke svarer to gange i træk. Den kan kun læse, aldrig ændre noget.")
+            Text("Donglen taler kun med bilen, mens CarPlay er forbundet (genvejene Start/Slut kørsel). Når CarPlay afbryder, stopper den med det samme, så den aldrig taler med en låst bil. Den spørger kun bilen, mens bilen kører (GPS over ca. 5 km/t), så der er stille, når du holder, stiger ud og låser. Den kræver derfor GPS slået til. Den spørger desuden først, når donglens egen 12 V-måling viser, at bilen er tændt (over 13 V). Den stopper til næste tur, hvis spændingen falder (bilen slukkes), eller hvis bilen ikke svarer to gange i træk. Den kan kun læse, aldrig ændre noget.")
         }
     }
 
