@@ -32,6 +32,9 @@ struct VehicleState: Sendable, Codable {
     var contactAt: Date? = nil
     /// True when `stateOfCharge` is projected forward from VW's last value during a drive.
     var socEstimated: Bool? = nil
+    /// The Worker's SoC projected to now while driving. Only Maps uses it; the app and the
+    /// widget show the car's own reported value (so they match the dashboard).
+    var socEstimate: Double? = nil
     /// The Worker's last error talking to VW/Smartcar (nil = fine).
     var workerError: String? = nil
 }

@@ -79,7 +79,7 @@ enum StatusClient {
             throw StatusError.unavailable(status.lastError)
         }
         return VehicleState(
-            stateOfCharge: status.socEstimate ?? soc,
+            stateOfCharge: soc,
             measuredAt: Date(timeIntervalSince1970: ms / 1000),
             isCharging: status.charging ?? false,
             rangeKm: status.rangeKm,
@@ -90,7 +90,8 @@ enum StatusClient {
             chargePowerW: status.charging == true ? status.wattageW : nil,
             chargeSamples: status.charging == true ? status.chargeSession?.samples : nil,
             contactAt: Date(),
-            socEstimated: status.socEstimate != nil,
+            socEstimated: nil,
+            socEstimate: status.socEstimate,
             workerError: (status.lastError?.isEmpty == false) ? status.lastError : nil
         )
     }
@@ -118,13 +119,22 @@ enum StateProvider {
 
     /// Best available state: live from the Worker (or a < 15 s old live answer), else the last
     /// cached one, else nil. Background updates pass a longer timeout and retry on timeout.
+    /// Maps gets the projected SoC while driving (VW reports only every few minutes).
+    private static func forMaps(_ s: VehicleState) -> VehicleState {
+        guard let e = s.socEstimate else { return s }
+        var v = s
+        v.stateOfCharge = e
+        v.socEstimated = true
+        return v
+    }
+
     static func current(timeout: TimeInterval = 2.5, background: Bool = false) async -> (state: VehicleState, origin: Origin)? {
-        if !background, let recent = RecentState.shared.get(maxAge: 15) { return (recent, .live) }
+        if !background, let recent = RecentState.shared.get(maxAge: 15) { return (forMaps(recent), .live) }
         do {
-            let state = try await StatusClient.fetch(timeout: timeout, retryOnTimeout: background)
-            RecentState.shared.set(state)
-            SharedStore.setCodable(state, for: .lastState)
-            return (state, .live)
+            let raw = try await StatusClient.fetch(timeout: timeout, retryOnTimeout: background)
+            RecentState.shared.set(raw)
+            SharedStore.setCodable(raw, for: .lastState)
+            return (forMaps(raw), .live)
         } catch {
             SharedLog.shared.log("status fetch failed: \(error)", category: "status")
             if let cached: VehicleState = SharedStore.codable(.lastState) {
