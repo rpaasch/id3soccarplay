@@ -167,8 +167,9 @@ final class GPSRecorder: NSObject, CLLocationManagerDelegate {
         // Not driving any more (or never started): end the segment and let GPS sleep.
         if let lm = lastMoving, Date().timeIntervalSince(lm) > Self.idleEndSec {
             finishSegment()
-            // During a CarPlay drive (max 4 h, in case the end event was missed) GPS stays on.
-            if let d = driveSince, Date().timeIntervalSince(d) < 4 * 3600 { return }
+            // During a CarPlay drive GPS stays on through stops of up to 30 min (charging, queues);
+            // longer means the end event was probably missed: sleep until a significant change.
+            if driveSince != nil, Date().timeIntervalSince(lm) < 30 * 60 { return }
             driveSince = nil
             manager.stopUpdatingLocation()
             precise = false

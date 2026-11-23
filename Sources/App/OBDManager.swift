@@ -95,11 +95,18 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         }
     }
 
-    /// The dongle may only talk while a drive is active (CarPlay connected), and never longer
-    /// than 4 hours after it started (in case an end event was missed).
+    /// The dongle may only talk while a drive is active (CarPlay connected). In case an end event
+    /// was missed, the drive also expires 2 hours after the car last moved; any length of drive
+    /// keeps it alive (the timestamp is renewed while moving).
     private var driveActive: Bool {
         guard let d = UserDefaults.standard.object(forKey: Self.driveKey) as? Date else { return false }
-        return Date().timeIntervalSince(d) < 4 * 3600
+        return Date().timeIntervalSince(d) < 2 * 3600
+    }
+
+    private func renewDriveLocked() {
+        guard let d = UserDefaults.standard.object(forKey: Self.driveKey) as? Date,
+              Date().timeIntervalSince(d) > 60, driveActive else { return }
+        UserDefaults.standard.set(Date(), forKey: Self.driveKey)
     }
 
     /// Ends the drive for good (persisted), so neither a timer, a reconnect nor an iOS relaunch
@@ -236,7 +243,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     func noteGPS(speed: Double, valid: Bool, at t: Date) {
         queue.async {
             self.lastFixAt = t
-            if valid && speed >= 1.5 { self.lastMovingAt = t }   // ~5 km/h
+            if valid && speed >= 1.5 { self.lastMovingAt = t; self.renewDriveLocked() }   // ~5 km/h
         }
     }
 
