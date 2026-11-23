@@ -33,14 +33,19 @@ final class CarPlayRoute: @unchecked Sendable {
 
     /// Logs every route change (with the reason), so the log shows when CarPlay comes and goes.
     func start() {
-        lock.lock(); defer { lock.unlock() }
-        guard observer == nil else { return }
-        observer = NotificationCenter.default.addObserver(
+        lock.lock()
+        let already = observer != nil
+        lock.unlock()
+        guard !already else { return }
+        // (The lock must not be held while logging: logState takes it too, and NSLock is not
+        // recursive – holding it here deadlocked the main thread at launch in build 141.)
+        let obs = NotificationCenter.default.addObserver(
             forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil
         ) { [weak self] note in
             let raw = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) ?? 0
             self?.logState(reason: "route change (reason \(raw))", force: true)
         }
+        lock.lock(); observer = obs; lock.unlock()
         logState(reason: "app start", force: true)
     }
 
