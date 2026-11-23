@@ -26,6 +26,9 @@ jobs:
   # Always-on compile check. Validates app + extension compile under Swift 6
   # strict concurrency. No signing material needed.
   compile:
+    # Skipped for signed builds: adhoc compiles the same code anyway, and every extra macOS
+    # job means another wait for a runner (two queued jobs were cancelled on 23 Nov).
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.sign) }}
     runs-on: macos-latest
     timeout-minutes: 25
     steps:
@@ -49,7 +52,6 @@ jobs:
   # the IPA back to the Worker, which hosts the install page. Manual dispatch
   # with sign=true.
   adhoc:
-    needs: compile
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.sign }}
     runs-on: macos-latest
     timeout-minutes: 40
