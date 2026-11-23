@@ -46,7 +46,8 @@ struct KeyValue: View {
     }
 }
 
-/// The big state-of-charge ring.
+/// The big state of charge: number, small "%", and a slim bar (same look as the widget;
+/// a ring could not hold "100" without the digits hitting the edge).
 struct BatteryRing: View {
     let soc: Double          // 0...1
     let charging: Bool
@@ -60,27 +61,28 @@ struct BatteryRing: View {
     }
 
     var body: some View {
-        ZStack {
-            // Inset by half the line width so the stroke stays inside the frame.
-            Circle().inset(by: 6.5).stroke(color.opacity(0.18), lineWidth: 13)
-            Circle().inset(by: 6.5)
-                .trim(from: 0, to: max(0.01, min(1, soc)))
-                .stroke(color.gradient, style: StrokeStyle(lineWidth: 13, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-                .animation(.easeOut(duration: 0.6), value: soc)
-            VStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 2) {
+                Text("\(Int((soc * 100).rounded()))")
+                    .font(.system(size: 60, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                Text("%").font(.system(size: 26, weight: .semibold, design: .rounded)).foregroundStyle(.secondary)
                 if charging {
-                    Image(systemName: "bolt.fill").font(.callout).foregroundStyle(.yellow)
-                }
-                HStack(alignment: .firstTextBaseline, spacing: 1) {
-                    Text("\(Int((soc * 100).rounded()))")
-                        .font(.system(size: 44, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                    Text("%").font(.headline).foregroundStyle(.secondary)
+                    Image(systemName: "bolt.fill").font(.system(size: 24, weight: .semibold)).foregroundStyle(.yellow)
                 }
             }
+            .lineLimit(1)
+            .minimumScaleFactor(0.6)
+            GeometryReader { g in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(color.opacity(0.22))
+                    Capsule().fill(color.gradient).frame(width: max(8, g.size.width * min(1, max(0, soc))))
+                }
+            }
+            .frame(height: 8)
+            .animation(.easeOut(duration: 0.6), value: soc)
         }
-        .frame(width: 128, height: 128)
+        .frame(width: 160, alignment: .leading)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Batteri \(Int((soc * 100).rounded())) procent\(charging ? ", lader" : "")")
     }
