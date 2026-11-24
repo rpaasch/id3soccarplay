@@ -67,13 +67,12 @@ enum MapsPowerResponse {
         response.chargePercentRemaining = Float(state.stateOfCharge)
 
         // The time Maps judges the value by. Maps says the connection to the car is lost when it
-        // is old (seen 22 Nov), and that is the only way to show staleness inside Maps:
-        //  * fresh or a few minutes old: the time we last reached the Worker -> no warning,
-        //  * stale (driving/charging and VW's value > 15 min old, or no contact for > 10 min):
-        //    the real measurement time -> Maps warns that the data is old.
-        let f = Freshness.of(state)
-        let stamp = f.level == .stale ? min(state.measuredAt, state.contactAt ?? state.measuredAt)
-                                      : (state.contactAt ?? state.measuredAt)
+        // is old (seen 22 Nov). VW's own timestamp lags 2-15 min while driving, so it would warn on
+        // most drives; Maps gets a projection for that gap instead. It warns only on a real loss:
+        //  * dongle live: the reading's time (seconds old),
+        //  * otherwise: when we last reached the Worker -> ages only if the connection is gone
+        //    (and after 15 min without contact Maps gets no value at all, see StateProvider).
+        let stamp = state.obdLive == true ? state.measuredAt : (state.contactAt ?? state.measuredAt)
         response.dateOfLastStateUpdate = Calendar.current.dateComponents(
             [.year, .month, .day, .hour, .minute, .second], from: stamp
         )
