@@ -57,7 +57,8 @@ struct BatteryProvider: AppIntentTimelineProvider {
         // While driving, the OBD dongle's live value (seconds old) beats VW's (2-15 min old).
         var obd = false
         if let r: OBDReading = SharedStore.codable(.obdReading), r.isFreshAndValid,
-           var s = state, r.at > s.measuredAt {
+           var s = state, r.at > s.measuredAt,
+           abs(r.soc - s.stateOfCharge) <= 0.05 || Date().timeIntervalSince(s.measuredAt) >= 15 * 60 {
             s.stateOfCharge = r.soc
             s.measuredAt = r.at
             s.obdLive = true

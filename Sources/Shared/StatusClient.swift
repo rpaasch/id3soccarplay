@@ -127,7 +127,17 @@ enum StateProvider {
     /// than the projection, Maps keeps the lower value instead of jumping back (94 -> 95 on 23 Nov).
     private static func forMaps(_ s: VehicleState) -> VehicleState {
         var v = s
-        if let r: OBDReading = SharedStore.codable(.obdReading), r.isFreshAndValid, r.at > s.measuredAt {
+        // Sanity check against VW: a dongle value far from the car's own recent value is wrong
+        // (24 Nov: Maps sat at 49 % while the car went 80 -> 62 %). VW lags a few pp while driving,
+        // so allow 5 pp against the projection (or the raw value) when VW reported < 15 min ago.
+        let vwRef = s.socEstimate ?? s.stateOfCharge
+        let vwRecent = Date().timeIntervalSince(s.measuredAt) < 15 * 60
+        if let r: OBDReading = SharedStore.codable(.obdReading), r.isFreshAndValid, r.at > s.measuredAt,
+           vwRecent, abs(r.soc - vwRef) > 0.05 {
+            SharedLog.shared.log(String(format: "OBD %.0f %% ignored: VW says %.0f %% (%.0f min ago)",
+                                        r.soc * 100, vwRef * 100, Date().timeIntervalSince(s.measuredAt) / 60), category: "status")
+            if let e = s.socEstimate { v.stateOfCharge = e; v.socEstimated = true }
+        } else if let r: OBDReading = SharedStore.codable(.obdReading), r.isFreshAndValid, r.at > s.measuredAt {
             // Live from the car via the dongle (seconds old) beats any projection.
             v.stateOfCharge = r.soc
             v.measuredAt = r.at

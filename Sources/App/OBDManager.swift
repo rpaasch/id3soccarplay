@@ -361,6 +361,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         voltMax = nil
         carOn = false
         paused = true
+        lastResidual = nil      // trust is earned again on every connection
         state = "forbundet, finder kanal…"
         log("OBD: connected \(p.name ?? "?")")
         p.discoverServices(nil)
@@ -670,16 +671,26 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         lastAnswer = Date()
         let bms = Double(byte) / 2.5
         bmsPct = bms
-        if let residual = learnPair(bms: bms) { lastResidual = residual }
+        if let residual = learnPair(bms: bms) {
+            lastResidual = residual
+            // Far off: the stored calibration is wrong (e.g. learnt from bad pairs). Start over.
+            if abs(residual) > 10 {
+                UserDefaults.standard.removeObject(forKey: Self.pairsKey)
+                UserDefaults.standard.removeObject(forKey: Self.calKey)
+                log(String(format: "OBD: calibration off by %.0f pp – reset, learning again", residual))
+            }
+        }
         let cal = calibration()
         let pct = min(100, max(0, cal.slope * bms + cal.intercept))
         lastSocPct = pct
         // For Maps: trusted from the first second once >= 3 comparisons agreed; a fresh comparison
         // that is off by more than 3 pp suspends it until the calibration has caught up.
+        // Trusted only after a comparison with VW on THIS connection agreed (24 Nov: an old
+        // calibration was trusted blindly and Maps showed 49 % while the car had 80 %).
         if let r = lastResidual {
             lastValidated = cal.pairs >= 3 ? abs(r) <= 3 : abs(r) <= 2
         } else {
-            lastValidated = cal.pairs >= 3
+            lastValidated = false
         }
         state = String(format: "live: %.1f %%", pct) + (lastValidated ? "" : " (afventer sammenligning med Smartcar)")
         let reading = OBDReading(soc: pct / 100, at: Date(), validated: lastValidated)
