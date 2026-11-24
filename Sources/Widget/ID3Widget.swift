@@ -67,7 +67,11 @@ struct BatteryProvider: AppIntentTimelineProvider {
         SharedLog.shared.flush()
         // Retry sooner when offline, charging or driving (the app also reloads on every percent).
         let minutes: Double = obd ? 5 : (!online ? 15 : (state?.isCharging == true ? 10 : 30))
-        return Timeline(entries: [BatteryEntry(date: .now, state: state, online: online)],
+        // Extra entries so the widget turns yellow/red by itself as the value ages (no refetch).
+        let entries = [0.0, 6, 11, 16].map { m in
+            BatteryEntry(date: .now.addingTimeInterval(m * 60), state: state, online: online)
+        }
+        return Timeline(entries: entries,
                         policy: .after(.now.addingTimeInterval(minutes * 60)))
     }
 }
@@ -115,16 +119,34 @@ private func duration(_ minutes: Int) -> String {
 }
 
 private enum Conn {
-    case ok, offline, vwError
+    case ok, aging, stale, offline, vwError
     init(_ e: BatteryEntry) {
+        if let s = e.state {
+            // Same rule as the app and Maps (Freshness), judged at this entry's time.
+            switch Freshness.of(s, now: e.date).level {
+            case .stale: self = e.online ? .stale : .offline; return
+            case .aging: self = .aging; return
+            case .fresh: break
+            }
+        }
         if !e.online { self = .offline }
         else if e.state?.workerError != nil { self = .vwError }
         else { self = .ok }
     }
-    var color: Color { switch self { case .ok: .green; case .offline: .orange; case .vwError: .red } }
-    var short: String { switch self { case .ok: "Forbundet"; case .offline: "Offline"; case .vwError: "VW svarer ikke" } }
+    var color: Color {
+        switch self { case .ok: .green; case .aging: .yellow; case .stale, .vwError: .red; case .offline: .orange }
+    }
+    var short: String {
+        switch self {
+        case .ok: "Friske tal"; case .aging: "Lidt gamle tal"; case .stale: "Gamle tal"
+        case .offline: "Offline"; case .vwError: "VW svarer ikke"
+        }
+    }
     var symbol: String {
-        switch self { case .ok: "checkmark.circle.fill"; case .offline: "wifi.slash"; case .vwError: "exclamationmark.triangle.fill" }
+        switch self {
+        case .ok: "checkmark.circle.fill"; case .aging, .stale: "clock.badge.exclamationmark"
+        case .offline: "wifi.slash"; case .vwError: "exclamationmark.triangle.fill"
+        }
     }
 }
 
@@ -298,6 +320,10 @@ struct BatteryWidgetView: View {
         HStack(spacing: 5) {
             Text("ID.3").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             Spacer(minLength: 0)
+            // Spelled out whenever the numbers can't be trusted (also in CarPlay).
+            if link != .ok {
+                Text(link.short).font(.caption2.weight(.semibold)).foregroundStyle(link.color).lineLimit(1)
+            }
             Circle().fill(link.color).frame(width: 7, height: 7)
         }
     }
@@ -359,7 +385,7 @@ struct BatteryWidgetView: View {
                 LinkBadge(link: link)
                 Spacer(minLength: 4)
                 switch link {
-                case .ok: (Text("bil målt ") + ageText(s.measuredAt)).font(.caption2).foregroundStyle(.secondary)
+                case .ok, .aging, .stale: (Text("bil målt ") + ageText(s.measuredAt)).font(.caption2).foregroundStyle(.secondary)
                 case .offline: (Text("sidst kendte, hentet ") + ageText(s.contactAt ?? s.measuredAt)).font(.caption2).foregroundStyle(.secondary)
                 case .vwError: Text("viser sidste måling").font(.caption2).foregroundStyle(.secondary)
                 }

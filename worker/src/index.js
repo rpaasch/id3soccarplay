@@ -1661,6 +1661,9 @@ async function statusEndpoint(request, env, ctx) {
     snap = { ...snap, minutesToFull: Math.max(1, Math.round(snap.minutesToFull - (Date.now() - snap.minutesToFullAt) / 60000)) };
   }
   const socEstimate = await estimateSocNow(env, snap);
-  return new Response(JSON.stringify({ available: true, ageSeconds: ageSec, lastError, kvWriteError, model, chargeSession, socEstimate, ...snap }),
+  // Driving = a trip is open. The apps use it to judge how fast VW's value goes stale.
+  const tripNow = await kvJsonCached(env, "trip_current", 30);
+  const driving = !!(tripNow && !tripNow.endAt) && snap.charging !== true;
+  return new Response(JSON.stringify({ available: true, ageSeconds: ageSec, lastError, kvWriteError, model, chargeSession, socEstimate, driving, ...snap }),
     { headers: { "content-type": "application/json" } });
 }

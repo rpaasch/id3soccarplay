@@ -39,6 +39,8 @@ struct VehicleState: Sendable, Codable {
     var obdLive: Bool? = nil
     /// The Worker's last error talking to VW/Smartcar (nil = fine).
     var workerError: String? = nil
+    /// True while a trip is open on the Worker (the car is being driven).
+    var driving: Bool? = nil
 }
 
 /// One measurement of the current charging session.

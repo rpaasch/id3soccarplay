@@ -66,10 +66,16 @@ enum MapsPowerResponse {
         response.carIdentifier = carId.uuidString
         response.chargePercentRemaining = Float(state.stateOfCharge)
 
-        // When we last heard from the car's data (the Worker). VW's own timestamp can be minutes
-        // old while driving; reporting that made Maps say the connection to the car was lost.
+        // The time Maps judges the value by. Maps says the connection to the car is lost when it
+        // is old (seen 22 Nov), and that is the only way to show staleness inside Maps:
+        //  * fresh or a few minutes old: the time we last reached the Worker -> no warning,
+        //  * stale (driving/charging and VW's value > 15 min old, or no contact for > 10 min):
+        //    the real measurement time -> Maps warns that the data is old.
+        let f = Freshness.of(state)
+        let stamp = f.level == .stale ? min(state.measuredAt, state.contactAt ?? state.measuredAt)
+                                      : (state.contactAt ?? state.measuredAt)
         response.dateOfLastStateUpdate = Calendar.current.dateComponents(
-            [.year, .month, .day, .hour, .minute, .second], from: state.contactAt ?? state.measuredAt
+            [.year, .month, .day, .hour, .minute, .second], from: stamp
         )
 
         // The two undocumented dictionaries that make routing work.

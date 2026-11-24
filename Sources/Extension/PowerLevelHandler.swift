@@ -146,7 +146,7 @@ private final class UpdateCoordinator: @unchecked Sendable {
                     lastPushed = s
                     lastPushAt = Date()
                     SharedLog.shared.log(
-                        "push -> SoC \(Int((s.stateOfCharge * 100).rounded()))% (\(s.obdLive == true ? "obd" : current.origin.rawValue)\(s.socEstimated == true ? ", estimated" : "")); model: \(adjusted.note)",
+                        "push -> SoC \(Int((s.stateOfCharge * 100).rounded()))% (\(Freshness.of(s).level), \(s.obdLive == true ? "obd" : current.origin.rawValue)\(s.socEstimated == true ? ", estimated" : "")); model: \(adjusted.note)",
                         category: "power"
                     )
                 }

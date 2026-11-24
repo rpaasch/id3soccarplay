@@ -70,9 +70,15 @@ struct ContentView: View {
                                 Text("\(Int(r.rounded())) km").font(.system(.title, design: .rounded).bold()).monospacedDigit()
                                 Text("rækkevidde ifølge bilen").font(.caption).foregroundStyle(.secondary)
                             }
-                            Label(measuredText(s.measuredAt), systemImage: "clock")
-                                .font(.caption).foregroundStyle(.secondary).padding(.top, 6)
-                                .lineLimit(1).minimumScaleFactor(0.8)
+                            let f = Freshness.of(s)
+                            Label {
+                                Text(f.text).foregroundStyle(f.level == .fresh ? Color.secondary : freshColor(f.level))
+                            } icon: {
+                                Image(systemName: f.level == .fresh ? "clock" : "exclamationmark.triangle.fill")
+                                    .foregroundStyle(freshColor(f.level))
+                            }
+                            .font(.caption).padding(.top, 6)
+                            .fixedSize(horizontal: false, vertical: true)
                         }
                         Spacer(minLength: 0)
                     }
@@ -540,6 +546,10 @@ struct ContentView: View {
         if cal.isDateInToday(d) { return "målt kl. \(time)" }
         if cal.isDateInYesterday(d) { return "målt i går kl. \(time)" }
         return "målt \(d.formatted(.dateTime.day().month(.defaultDigits).locale(DK.locale))) kl. \(time)"
+    }
+
+    private func freshColor(_ l: Freshness.Level) -> Color {
+        switch l { case .fresh: .green; case .aging: .yellow; case .stale: .red }
     }
 
     private func ageText(_ d: Date) -> String {

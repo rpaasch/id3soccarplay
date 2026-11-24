@@ -31,6 +31,8 @@ private struct RemoteStatus: Decodable {
     let chargeSession: ChargeSessionDTO?
     /// SoC projected to now while driving (VW reports only every few minutes).
     let socEstimate: Double?
+    /// True while a trip is open (driving).
+    let driving: Bool?
 }
 
 private struct ChargeSessionDTO: Decodable {
@@ -92,7 +94,8 @@ enum StatusClient {
             contactAt: Date(),
             socEstimated: nil,
             socEstimate: status.socEstimate,
-            workerError: (status.lastError?.isEmpty == false) ? status.lastError : nil
+            workerError: (status.lastError?.isEmpty == false) ? status.lastError : nil,
+            driving: status.driving
         )
     }
 }
@@ -146,8 +149,14 @@ enum StateProvider {
             return (forMaps(raw), .live)
         } catch {
             SharedLog.shared.log("status fetch failed: \(error)", category: "status")
+            // Last known values only while they can still be trusted: the dongle is live, or we
+            // reached the Worker within the last 15 min. Older numbers are not sent to Maps at all
+            // (better "no data" than a confidently wrong SoC).
             if let cached: VehicleState = SharedStore.codable(.lastState) {
-                return (cached, .cache)
+                let v = forMaps(cached)
+                let age = Date().timeIntervalSince(cached.contactAt ?? cached.measuredAt)
+                if v.obdLive == true || age < 15 * 60 { return (v, .cache) }
+                SharedLog.shared.log("cached state is \(Int(age / 60)) min old – not sent to Maps", category: "status")
             }
             return nil
         }
