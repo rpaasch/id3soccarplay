@@ -685,12 +685,14 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         lastSocPct = pct
         // For Maps: trusted from the first second once >= 3 comparisons agreed; a fresh comparison
         // that is off by more than 3 pp suspends it until the calibration has caught up.
-        // Trusted only after a comparison with VW on THIS connection agreed (24 Nov: an old
-        // calibration was trusted blindly and Maps showed 49 % while the car had 80 %).
+        // Trust: a comparison with VW on this connection decides. Before the first one, a well
+        // established calibration (>= 10 pairs) is trusted, because VW can go quiet for 30+ min
+        // while driving (24 Nov 16:40: Maps sat on a 33-min-old 36 % while the dongle was live).
+        // Maps and the widget still reject a dongle value > 5 pp away from a recent VW value.
         if let r = lastResidual {
             lastValidated = cal.pairs >= 3 ? abs(r) <= 3 : abs(r) <= 2
         } else {
-            lastValidated = false
+            lastValidated = cal.pairs >= 10
         }
         state = String(format: "live: %.1f %%", pct) + (lastValidated ? "" : " (afventer sammenligning med Smartcar)")
         let reading = OBDReading(soc: pct / 100, at: Date(), validated: lastValidated)
