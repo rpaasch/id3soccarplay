@@ -107,42 +107,86 @@ struct StatusChip: View {
 struct SpeedBinsChart: View {
     let bins: [Double]       // 10 bins, traction only
     let auxW: Double
+    /// Part of auxW that is only the cold-start extra (first ~15 min of a cold car).
+    var coldW: Double = 0
 
-    private struct Bar: Identifiable { let id: Int; let label: String; let kwh: Double }
+    /// One segment of a stacked bar: driving (wheels) or heating, per speed.
+    private struct Part: Identifiable {
+        let id: String
+        let label: String
+        let kind: String
+        let kwh: Double
+        let total: Double
+        let top: Bool
+    }
 
     static let mids = [10.0, 30, 50, 70, 90, 110, 130, 150]
+    static let drivingLabel = "Kørsel"
+    static let heatingLabel = "Varme"
+    static let coldLabel = "Koldstart"
 
     /// kWh/100 km at speed bin `i` including heating (aux power spread over the km driven).
     static func value(bins: [Double], auxW: Double, index i: Int) -> Double {
-        bins[i] + auxW / 1000 / mids[i] * 100
+        bins[i] + heating(auxW: auxW, index: i)
     }
 
-    private var bars: [Bar] {
-        Self.mids.indices.map { i in
-            Bar(id: i, label: "\(Int(Self.mids[i]))", kwh: Self.value(bins: bins, auxW: auxW, index: i))
+    /// Heating's share per 100 km: the same kW, but the slower you go, the longer each km takes.
+    static func heating(auxW: Double, index i: Int) -> Double { auxW / 1000 / mids[i] * 100 }
+
+    private var parts: [Part] {
+        Self.mids.indices.flatMap { i -> [Part] in
+            let label = "\(Int(Self.mids[i]))"
+            let drive = bins[i]
+            let cold = Self.heating(auxW: coldW, index: i)
+            let heat = Self.heating(auxW: auxW - coldW, index: i)
+            let total = drive + heat + cold
+            var out = [
+                Part(id: "\(i)d", label: label, kind: Self.drivingLabel, kwh: drive, total: total, top: false),
+                Part(id: "\(i)h", label: label, kind: Self.heatingLabel, kwh: heat, total: total, top: coldW <= 0),
+            ]
+            if coldW > 0 {
+                out.append(Part(id: "\(i)c", label: label, kind: Self.coldLabel, kwh: cold, total: total, top: true))
+            }
+            return out
         }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("kWh pr. 100 km ved hver fart").font(.caption2).foregroundStyle(.secondary)
-            Chart(bars) { b in
-                BarMark(x: .value("km/t", b.label), y: .value("kWh/100 km", b.kwh), width: .ratio(0.6))
-                    .foregroundStyle(.teal.gradient)
-                    .cornerRadius(3)
+            Chart(parts) { p in
+                BarMark(x: .value("km/t", p.label), y: .value("kWh/100 km", p.kwh), width: .ratio(0.6))
+                    .foregroundStyle(by: .value("Del", p.kind))
                     .annotation(position: .top, spacing: 2) {
-                        Text("\(Int(b.kwh.rounded()))").font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                        if p.top {
+                            Text("\(Int(p.total.rounded()))").font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                        }
                     }
             }
+            .chartForegroundStyleScale([Self.drivingLabel: Color.teal, Self.heatingLabel: Color.orange,
+                                        Self.coldLabel: Color.orange.opacity(0.45)])
+            .chartLegend(position: .top, alignment: .leading, spacing: 6)
             .chartYAxis(.hidden)
             .chartXAxis {
                 AxisMarks { _ in AxisValueLabel().font(.caption2) }
             }
-            .frame(height: 110)
+            .frame(height: 130)
             Text("km/t").font(.caption2).foregroundStyle(.tertiary).frame(maxWidth: .infinity, alignment: .trailing)
+            Text(note)
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Forbrug efter fart, som Maps regner med")
+        .accessibilityLabel("Forbrug efter fart, som Maps regner med, delt i kørsel og varme")
+    }
+
+    private var note: String {
+        let steady = (auxW - coldW) / 1000
+        var s = "Varmen bruger ca. \(DK.num(steady, 1)) kW, uanset fart. Kører du langsomt, tager hver km længere tid, så varmens andel pr. km bliver stor. Pr. time bruger bilen ved 10 km/t kun ca. \(DK.num(bins[0] / 10 + auxW / 1000, 1)) kW mod \(DK.num(auxW / 1000, 1)) kW, når den holder stille."
+        if coldW > 0 {
+            s += " Bilen er kold lige nu, så Maps får \(DK.num(coldW / 1000, 1)) kW ekstra, til den er varmet op (ca. de første 15 min)."
+        }
+        return s
     }
 }
 

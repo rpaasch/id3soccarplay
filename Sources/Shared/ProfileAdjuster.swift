@@ -47,6 +47,8 @@ struct ModelHints: Sendable, Codable {
     var consumptionBinsKwhPer100: [Double]?
     /// Auxiliary power (heating etc.) in W that Maps adds per hour of driving; replaces id3.json's 500 W.
     var auxPowerW: Double?
+    /// Part of auxPowerW that is the cold-start extra (only while the car warms up; 0/nil when warm).
+    var coldStartBoostW: Double?
     /// When set, consumption is calibrated by your own trips (actual / physics prediction).
     var tripCalibration: TripCalibrationHint?
 }

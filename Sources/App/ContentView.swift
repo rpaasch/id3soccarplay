@@ -171,7 +171,7 @@ struct ContentView: View {
                     tile(DK.num(SpeedBinsChart.value(bins: bins, auxW: aux, index: 4), 0) + " kWh", "landevej, 90")
                     tile(DK.num(SpeedBinsChart.value(bins: bins, auxW: aux, index: 6), 0) + " kWh", "motorvej, 130")
                 }
-                SpeedBinsChart(bins: bins, auxW: aux)
+                SpeedBinsChart(bins: bins, auxW: aux, coldW: min(aux, max(0, m.coldStartBoostW ?? 0)))
             } else if let k = m.consumptionKwhPer100 {
                 tile(DK.num(k) + " kWh", "pr. 100 km i snit")
             }
@@ -191,9 +191,6 @@ struct ContentView: View {
 
     private func mapsFootnote(_ m: ModelHints) -> String {
         var parts: [String] = []
-        if let a = m.auxPowerW {
-            parts.append("Varmen bruger \(DK.num(a / 1000)) kW hele tiden, så ved lav fart koster den mest pr. km.")
-        }
         if let c = m.tripCalibration {
             let pct = Int(((c.factor - 1) * 100).rounded())
             if pct > 0 {
