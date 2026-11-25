@@ -173,24 +173,15 @@ extension VehicleProfile {
             consumptionParams = consumptionParams.multiplyingArray("vehicle_consumption_values_wh_per_m", by: shape)
             notes.append("shape \(hints.consumptionShapeMode ?? "?")")
         }
-        if let bins = hints.consumptionBinsKwhPer100, bins.count == 10,
-           let baselineWhPerM = consumptionParams.mean(of: "vehicle_consumption_values_wh_per_m"),
-           baselineWhPerM > 0 {
-            // We do NOT know what Maps' 10 positions mean. Sending the bins as a 10..190 km/h axis
-            // made Maps predict ~40 kWh/100 km on the motorway commute (24 + 25 Nov: 30-31 % used
-            // predicted, 18-19 % real), so Maps reads the steep top bins for ordinary driving.
-            // Keep Porsche's own, nearly flat shape and scale it to our distance-weighted driving
-            // consumption; heating stays in vehicle_auxiliary_power_w. Whatever the axis, the
-            // result is then close to the real average.
-            let mix: [Double] = [0.03, 0.12, 0.15, 0.12, 0.18, 0.2, 0.15, 0.05, 0, 0] // = Worker BIN_MIX
-            let driving = zip(bins, mix).reduce(0) { $0 + $1.0 * $1.1 } / mix.reduce(0, +)
-            let factor = min(2.0, max(0.5, driving / (baselineWhPerM * 100)))
-            consumptionParams = consumptionParams.scalingArray("vehicle_consumption_values_wh_per_m", by: factor)
+        if let bins = hints.consumptionBinsKwhPer100, bins.count == 10 {
+            // kWh/100 km -> Wh per metre is /100.
+            consumptionParams = consumptionParams.replacingArray(
+                "vehicle_consumption_values_wh_per_m", with: bins.map { min(0.6, max(0.05, $0 / 100)) })
             if let aux = hints.auxPowerW, (200...4000).contains(aux) {
                 consumptionParams = consumptionParams.replacingNumber("vehicle_auxiliary_power_w", with: aux)
             }
-            notes.append(String(format: "flat %.1f kWh/100km from %@ bins (x%.2f) + aux %.0f W; mean %.1f",
-                                driving, hints.consumptionShapeMode ?? "?", factor,
+            notes.append(String(format: "speed bins %@ (50: %.0f, 110: %.0f, 130: %.0f kWh/100km + aux %.0f W; mean %.1f)",
+                                hints.consumptionShapeMode ?? "?", bins[2], bins[5], bins[6],
                                 hints.auxPowerW ?? 500, hints.consumptionKwhPer100 ?? 0))
         } else if let implied = hints.consumptionKwhPer100,
            let baselineWhPerM = consumptionParams.mean(of: "vehicle_consumption_values_wh_per_m"),
