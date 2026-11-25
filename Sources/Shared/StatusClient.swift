@@ -147,7 +147,14 @@ enum StateProvider {
             v.stateOfCharge = e
             v.socEstimated = true
         }
-        return MapsFloor.shared.apply(v)
+        // Keep the range in step with the SoC Maps gets. VW's range belongs to VW's (older) SoC;
+        // sending the dongle's 47 % with VW's range from 52 % gave Maps two numbers that disagree,
+        // and the range hardly moved between VW reports. Scale it to the SoC actually sent.
+        var out = MapsFloor.shared.apply(v)
+        if let km = s.rangeKm, s.stateOfCharge > 0.03, abs(out.stateOfCharge - s.stateOfCharge) > 0.001 {
+            out.rangeKm = max(0, (km * out.stateOfCharge / s.stateOfCharge).rounded())
+        }
+        return out
     }
 
     static func current(timeout: TimeInterval = 2.5, background: Bool = false) async -> (state: VehicleState, origin: Origin)? {
