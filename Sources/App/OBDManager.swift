@@ -367,6 +367,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         carOn = false
         paused = true
         lastResidual = nil      // trust is earned again on every connection
+        powerWin = PowerWindow(); lastPowerAt = nil; energyKwh = 0; energySignedKwh = 0; voltsAt = nil
         state = "forbundet, finder kanal…"
         log("OBD: connected \(p.name ?? "?")")
         p.discoverServices(nil)
@@ -526,7 +527,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private func startPollingLocked() {
         state = "læser batteriet"
         let t = DispatchSource.makeTimerSource(queue: queue)
-        t.schedule(deadline: .now(), repeating: 5)
+        t.schedule(deadline: .now(), repeating: 1)   // 1 s ticks; each request below has its own period
         t.setEventHandler { [weak self] in
             guard let self else { return }
             // Hard gate before every request: no drive, no talking.
@@ -540,7 +541,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             if !self.carOn {
                 if Date().timeIntervalSince(self.connectedAt) > 60 {
                     self.stopDriveLocked(reason: "12 V never showed the car on")
-                } else {
+                } else if self.tick % 5 == 0 {
                     self.send("ATRV")
                 }
                 return
@@ -548,11 +549,11 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             // Standing still (or no GPS): no car requests, only the dongle's own 12 V check.
             if !self.movingNow {
                 if !self.paused { self.paused = true; self.state = "holder stille – læser ikke bilen"; self.log("OBD: standing still, car requests paused") }
-                if self.tick % 3 == 0 { self.send("ATRV") }
+                if self.tick % 15 == 0 { self.send("ATRV") }
                 // Standing still the SoC does not move, so the last live value stays true. Re-stamp
                 // it (up to 10 min after the last real answer) so Maps doesn't fall back to the
                 // 2-5 min old cloud value at every red light. Paused anyway on a switch-off (12 V).
-                if self.tick % 3 == 1, self.lastValidated, let pct = self.lastSocPct,
+                if self.tick % 15 == 1, self.lastValidated, let pct = self.lastSocPct,
                    let a = self.lastAnswer, Date().timeIntervalSince(a) < 10 * 60 {
                     SharedStore.setCodable(OBDReading(soc: pct / 100, at: Date(), validated: true), for: .obdReading)
                 }
@@ -564,33 +565,35 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                 self.stopDriveLocked(reason: "car silent for 20 s")
                 return
             }
-            if self.tick % 3 == 0 {                     // every ~15 s: 12 V (dongle only) – detects switch-off
+            // Periods (1 s ticks): 12 V every 15 s, SoC every 10 s, voltage every 5 s, one of the
+            // remaining values every 30 s, battery current in every other second (~1 Hz power).
+            let slot = self.tick % 30
+            if slot % 15 == 0 {                          // 12 V (dongle only) – detects switch-off
                 self.send("ATRV")
-            } else if self.tick % 6 == 1 || self.tick % 6 == 4 {
-                // Every ~30 s the battery current (and with it the power line in the log); in the
-                // other slot alternately the voltage and one of the remaining values in turn.
+            } else if slot % 10 == 3 {
+                self.send(Self.pollCommand) { reply in self.handlePoll(reply) }
+            } else {
                 let did: String
-                if self.tick % 6 == 1 {
-                    did = "1E3D"
-                } else if (self.tick / 6) % 2 == 0 {
-                    did = "1E3B"
-                } else {
+                if slot == 7 {
                     let rest = Self.extraDIDs.filter { $0 != "1E3B" && $0 != "1E3D" }
                     did = rest[self.restIndex % rest.count]
                     self.restIndex += 1
+                } else if slot % 5 == 1 {
+                    did = "1E3B"
+                } else {
+                    did = "1E3D"
                 }
                 self.send("22" + did) { reply in
                     let c = reply.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "\r", with: "")
                     if let r = c.range(of: "62" + did) {
                         self.extras[did] = String(c[r.upperBound...].prefix(16))
-                        if did == "1E3D" { self.logPowerLocked() }
+                        if did == "1E3B" { self.voltsAt = Date() }
+                        if did == "1E3D" { self.addPowerSampleLocked() }
                     }
                     // Only a success counts here (some extra values may be unsupported);
                     // missing answers are judged on the main SoC poll.
                     if c.contains("62" + did) || c.contains("7F22") { self.carAnswered(true) }
                 }
-            } else {
-                self.send(Self.pollCommand) { reply in self.handlePoll(reply) }
             }
         }
         t.resume()
@@ -741,26 +744,44 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         return Double(v)
     }
 
-    /// One log line per current reading (~30 s) while driving: raw values plus the provisional
-    /// interpretation, so the scaling and sign can be checked against speed afterwards.
-    private func logPowerLocked() {
-        guard let rawA = extras["1E3D"] else { return }
-        let rawV = extras["1E3B"] ?? "?"
-        var line = "OBD power: raw V \(rawV.prefix(4)) A \(rawA.prefix(6))"
-        let volts = extras["1E3B"].flatMap { u($0, bytes: 2) }.map { $0 / 4 }
-        if let a = u(rawA, bytes: 3) {
-            let unsignedA = a / 100
-            let signedA = (a >= 0x800000 ? a - 0x1000000 : a) / 100
-            line += String(format: " -> %.1f A (signed %.1f A)", unsignedA, signedA)
-            if let v = volts { line += String(format: " × %.0f V = %.1f kW (signed %.1f kW)", v, unsignedA * v / 1000, signedA * v / 1000) }
+    /// ~1 Hz current samples, summarised in the log every 30 s: average / min / max power with
+    /// both readings of the sign (still unverified), average GPS speed, and energy integrated
+    /// since the dongle connected. Raw values of the last sample are included for checking.
+    private struct PowerWindow {
+        var n = 0, sumKw = 0.0, sumSignedKw = 0.0, minKw = Double.infinity, maxKw = -Double.infinity
+        var sumKmh = 0.0, nKmh = 0
+        var start = Date()
+    }
+    private var powerWin = PowerWindow()
+    private var lastPowerAt: Date?
+    private var energyKwh = 0.0, energySignedKwh = 0.0
+    private var voltsAt: Date?
+
+    private func addPowerSampleLocked() {
+        guard let rawA = extras["1E3D"], let a = u(rawA, bytes: 3),
+              let rawV = extras["1E3B"], let v = u(rawV, bytes: 2).map({ $0 / 4 }),
+              let va = voltsAt, Date().timeIntervalSince(va) < 15 else { return }
+        let now = Date()
+        let kw = a / 100 * v / 1000
+        let signedKw = (a >= 0x800000 ? a - 0x1000000 : a) / 100 * v / 1000
+        if let p = lastPowerAt {
+            let dt = now.timeIntervalSince(p)
+            if dt < 10 { energyKwh += kw * dt / 3600; energySignedKwh += signedKw * dt / 3600 }
         }
-        if let k = lastSpeedKmh, let f = lastFixAt, Date().timeIntervalSince(f) < 10 {
-            line += String(format: " · %.0f km/t", k)
-        } else {
-            line += " · fart ukendt"
-        }
+        lastPowerAt = now
+        powerWin.n += 1; powerWin.sumKw += kw; powerWin.sumSignedKw += signedKw
+        powerWin.minKw = min(powerWin.minKw, signedKw); powerWin.maxKw = max(powerWin.maxKw, signedKw)
+        if let k = lastSpeedKmh, let f = lastFixAt, now.timeIntervalSince(f) < 10 { powerWin.sumKmh += k; powerWin.nKmh += 1 }
+        guard now.timeIntervalSince(powerWin.start) >= 30 else { return }
+        let w = powerWin
+        var line = String(format: "OBD power %ds: %d samples, avg %.1f kW (signed %.1f, min %.1f / max %.1f)",
+                          Int(now.timeIntervalSince(w.start)), w.n, w.sumKw / Double(w.n), w.sumSignedKw / Double(w.n), w.minKw, w.maxKw)
+        line += w.nKmh > 0 ? String(format: " · %.0f km/t", w.sumKmh / Double(w.nKmh)) : " · fart ukendt"
+        line += String(format: " · %.0f V · energy %.2f kWh (signed %.2f)", v, energyKwh, energySignedKwh)
         if let t = bmsPct { line += String(format: " · BMS %.1f %%", t) }
+        line += " · raw A \(rawA.prefix(6)) V \(rawV.prefix(4))"
         log(line)
+        powerWin = PowerWindow()
     }
 
     var decodedLocked: [(String, String)] {
