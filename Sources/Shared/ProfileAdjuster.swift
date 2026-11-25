@@ -51,6 +51,30 @@ struct ModelHints: Sendable, Codable {
     var coldStartBoostW: Double?
     /// When set, consumption is calibrated by your own trips (actual / physics prediction).
     var tripCalibration: TripCalibrationHint?
+    /// Every learned DC curve (all temperature bands, warm and cold battery), for the chart.
+    var chargeCurves: [ChargeCurveInfo]?
+    /// Which of `chargeCurves` Maps gets right now.
+    var chargeCurveActive: ChargeCurveKey?
+}
+
+/// One learned DC charging curve from the Worker.
+struct ChargeCurveInfo: Codable, Sendable, Hashable {
+    /// Lower edge of the 5 °C band, e.g. -5 = -5 til 0 °C.
+    let band: Int
+    let warm: Bool
+    let sessions: Int?
+    /// When the last session was added (ms since 1970).
+    let updated: Double?
+    /// kW at SoC 0, 10 … 100 %; nil = not measured.
+    let curveKw: [Double?]
+
+    var key: ChargeCurveKey { ChargeCurveKey(band: band, warm: warm) }
+    var label: String { "\(band) til \(band + 5) °C, \(warm ? "varmt" : "koldt") batteri" }
+}
+
+struct ChargeCurveKey: Codable, Sendable, Hashable {
+    let band: Int
+    let warm: Bool
 }
 
 /// Mirror of the Worker's trip calibration, available to the extension too.

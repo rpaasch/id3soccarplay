@@ -746,6 +746,8 @@ async function learnCharging(env, snap, tempC, log) {
     data.sessions = (data.sessions || 0) + 1;
     data.updated = Date.now();
     await kvPut(env, key, JSON.stringify(data));
+    const idx = (await env.STATE.get("charge_bands_index", "json")) || null;
+    if (Array.isArray(idx) && !idx.includes(key)) await kvPut(env, "charge_bands_index", JSON.stringify([...idx, key]));
   }
 }
 
@@ -780,6 +782,31 @@ async function checkCapacity(env, sess) {
 function percentile(arr, p) {
   const a = [...arr].sort((x, y) => x - y);
   return a[Math.min(a.length - 1, Math.floor(p * a.length))];
+}
+
+// Every learned DC curve, for the app's chart: one entry per temperature band and battery state.
+// The key list is kept in "charge_bands_index" so /status never needs a (rate-limited) KV list.
+async function allChargeCurves(env) {
+  let idx = await kvJsonCached(env, "charge_bands_index", 300);
+  if (!Array.isArray(idx)) {
+    const list = await env.STATE.list({ prefix: "learn_charge_" });
+    idx = list.keys.map((k) => k.name);
+    await kvPut(env, "charge_bands_index", JSON.stringify(idx));
+  }
+  const datas = await Promise.all(idx.map((k) => kvJsonCached(env, k, 300)));
+  const out = [];
+  idx.forEach((key, i) => {
+    const d = datas[i];
+    if (!d || !Array.isArray(d.bins)) return;
+    const rest = key.replace("learn_charge_", "");
+    const warm = rest.endsWith("_w");
+    const band = Number(rest.replace(/_w$/, ""));
+    if (!isFinite(band)) return;
+    const curveKw = d.bins.map((v) => (v.length ? Math.round(percentile(v, 0.8) * 10) / 10 : null));
+    if (!curveKw.some((x) => x != null)) return;
+    out.push({ band, warm, sessions: d.sessions || 0, updated: d.updated || null, curveKw });
+  });
+  return out.sort((a, b) => a.band - b.band || Number(a.warm) - Number(b.warm));
 }
 
 async function learnedChargeCurve(env, tempC, warm) {
@@ -1567,7 +1594,10 @@ async function buildModel(env, snap, ctx) {
   if (cc) {
     model.chargeCurveKw = cc.curveKw; model.chargeSessions = cc.sessions; model.chargeCurveWarm = !!cc.warm;
     if (cc.borrowedBand != null) model.chargeCurveBand = cc.borrowedBand;
+    const ab = cc.borrowedBand ?? Number(tempBand(t));
+    if (isFinite(ab)) model.chargeCurveActive = { band: ab, warm: !!cc.warm };
   }
+  try { model.chargeCurves = await allChargeCurves(env); } catch (_) { /* chart only */ }
   model.batteryWarm = warm;
   // Cold start: extra heating power while the car warms up. Applies when planning from a car
   // that has been parked >= 1 h, and during the first 15 min of a trip that started cold. Maps

@@ -362,6 +362,10 @@ struct ContentView: View {
                             Text("Der er endnu ingen målinger ved den temperatur. Maps bruger standardkurven, indtil du har hurtigladet.")
                                 .font(.callout)
                         }
+                        if let all = m.chargeCurves, !all.isEmpty {
+                            LearnedCurvesView(curves: all, active: m.chargeCurveActive)
+                                .padding(.vertical, 4)
+                        }
                         if let c = m.capacityKwhNet {
                             KeyValue(key: "Brugbart batteri", value: "\(Int(c)) kWh")
                         }
@@ -674,6 +678,81 @@ private struct CurvePoint: Identifiable {
     let soc: Double      // percent
     let kw: Double
     let learned: Bool
+}
+
+/// Every learned DC curve in one chart, with the one Maps gets right now drawn bold.
+/// Each temperature band (5 °C) and battery state (warm/cold) is learned separately.
+private struct LearnedCurvesView: View {
+    let curves: [ChargeCurveInfo]
+    let active: ChargeCurveKey?
+
+    private static let palette: [Color] = [.blue, .orange, .teal, .red, .purple, .green, .pink, .brown]
+    private func color(_ i: Int) -> Color { Self.palette[i % Self.palette.count] }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Alle dine hurtigladninger")
+                .font(.subheadline.weight(.semibold))
+            Chart {
+                ForEach(Array(curves.enumerated()), id: \.element) { i, c in
+                    let isActive = c.key == active
+                    ForEach(points(c), id: \.0) { p in
+                        LineMark(x: .value("Batteri", p.0), y: .value("kW", p.1), series: .value("Kurve", c.label))
+                            .foregroundStyle(color(i).opacity(isActive ? 1 : 0.55))
+                            .lineStyle(StrokeStyle(lineWidth: isActive ? 3 : 1.5))
+                        PointMark(x: .value("Batteri", p.0), y: .value("kW", p.1))
+                            .foregroundStyle(color(i).opacity(isActive ? 1 : 0.55))
+                            .symbolSize(isActive ? 40 : 20)
+                    }
+                }
+            }
+            .chartXScale(domain: 0...100)
+            .chartXAxis {
+                AxisMarks(values: [0, 20, 40, 60, 80, 100]) { v in
+                    AxisGridLine()
+                    AxisValueLabel { if let x = v.as(Int.self) { Text("\(x) %") } }
+                }
+            }
+            .chartYAxisLabel("kW")
+            .frame(height: 180)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Ladekurver for \(curves.count) temperaturer. Detaljer står i listen under grafen.")
+
+            ForEach(Array(curves.enumerated()), id: \.element) { i, c in
+                let isActive = c.key == active
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Circle().fill(color(i)).frame(width: 8, height: 8)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(c.label + (isActive ? " · bruges nu" : ""))
+                            .font(.callout.weight(isActive ? .semibold : .regular))
+                        Text(detail(c))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+            }
+            Text(active == nil
+                 ? "Ingen af kurverne passer til vejret lige nu, så Maps bruger standardkurven."
+                 : "Maps får den fede kurve: den, der passer til temperaturen og batteriet lige nu. Mangler den, låner appen fra den nærmeste temperatur.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func points(_ c: ChargeCurveInfo) -> [(Int, Double)] {
+        c.curveKw.enumerated().compactMap { i, kw in kw.map { (i * 10, $0) } }
+    }
+
+    private func detail(_ c: ChargeCurveInfo) -> String {
+        let pts = points(c)
+        let n = c.sessions ?? 0
+        var s = "\(n) \(n == 1 ? "ladning" : "ladninger")"
+        if let lo = pts.first?.0, let hi = pts.last?.0 { s += ", målt \(lo)–\(min(hi + 10, 100)) %" }
+        if let mx = pts.map(\.1).max() { s += ", op til \(Int(mx.rounded())) kW" }
+        if let u = c.updated {
+            s += ", senest " + Date(timeIntervalSince1970: u / 1000).formatted(.dateTime.day().month(.abbreviated))
+        }
+        return s
+    }
 }
 
 /// The curve exactly as Maps receives it (baseline adapted with the live hints).
