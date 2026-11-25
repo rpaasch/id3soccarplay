@@ -227,6 +227,10 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var failCount = 0
     private var extras: [String: String] = [:]
     private var tick = 0
+    /// Last valid GPS speed (km/h), for the power log line.
+    private var lastSpeedKmh: Double?
+    /// Index into the non-power extra DIDs (temperatures etc.), read in turn.
+    private var restIndex = 0
     private var connectedAt = Date()
     /// Set when the car went silent during a drive: no reconnect until the next drive start.
     private var silentStop = false
@@ -246,6 +250,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     func noteGPS(speed: Double, valid: Bool, at t: Date) {
         queue.async {
             self.lastFixAt = t
+            if valid && speed >= 0 { self.lastSpeedKmh = speed * 3.6 }
             if valid && speed >= 1.5 { self.lastMovingAt = t; self.renewDriveLocked() }   // ~5 km/h
         }
     }
@@ -561,11 +566,25 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             }
             if self.tick % 3 == 0 {                     // every ~15 s: 12 V (dongle only) – detects switch-off
                 self.send("ATRV")
-            } else if self.tick % 6 == 1 {              // every ~30 s: one extra battery value, in turn
-                let did = Self.extraDIDs[(self.tick / 6) % Self.extraDIDs.count]
+            } else if self.tick % 6 == 1 || self.tick % 6 == 4 {
+                // Every ~30 s the battery current (and with it the power line in the log); in the
+                // other slot alternately the voltage and one of the remaining values in turn.
+                let did: String
+                if self.tick % 6 == 1 {
+                    did = "1E3D"
+                } else if (self.tick / 6) % 2 == 0 {
+                    did = "1E3B"
+                } else {
+                    let rest = Self.extraDIDs.filter { $0 != "1E3B" && $0 != "1E3D" }
+                    did = rest[self.restIndex % rest.count]
+                    self.restIndex += 1
+                }
                 self.send("22" + did) { reply in
                     let c = reply.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "\r", with: "")
-                    if let r = c.range(of: "62" + did) { self.extras[did] = String(c[r.upperBound...].prefix(16)) }
+                    if let r = c.range(of: "62" + did) {
+                        self.extras[did] = String(c[r.upperBound...].prefix(16))
+                        if did == "1E3D" { self.logPowerLocked() }
+                    }
                     // Only a success counts here (some extra values may be unsupported);
                     // missing answers are judged on the main SoC poll.
                     if c.contains("62" + did) || c.contains("7F22") { self.carAnswered(true) }
@@ -720,6 +739,28 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private func u(_ hex: String, bytes: Int) -> Double? {
         guard hex.count >= bytes * 2, let v = UInt32(hex.prefix(bytes * 2), radix: 16) else { return nil }
         return Double(v)
+    }
+
+    /// One log line per current reading (~30 s) while driving: raw values plus the provisional
+    /// interpretation, so the scaling and sign can be checked against speed afterwards.
+    private func logPowerLocked() {
+        guard let rawA = extras["1E3D"] else { return }
+        let rawV = extras["1E3B"] ?? "?"
+        var line = "OBD power: raw V \(rawV.prefix(4)) A \(rawA.prefix(6))"
+        let volts = extras["1E3B"].flatMap { u($0, bytes: 2) }.map { $0 / 4 }
+        if let a = u(rawA, bytes: 3) {
+            let unsignedA = a / 100
+            let signedA = (a >= 0x800000 ? a - 0x1000000 : a) / 100
+            line += String(format: " -> %.1f A (signed %.1f A)", unsignedA, signedA)
+            if let v = volts { line += String(format: " × %.0f V = %.1f kW (signed %.1f kW)", v, unsignedA * v / 1000, signedA * v / 1000) }
+        }
+        if let k = lastSpeedKmh, let f = lastFixAt, Date().timeIntervalSince(f) < 10 {
+            line += String(format: " · %.0f km/t", k)
+        } else {
+            line += " · fart ukendt"
+        }
+        if let t = bmsPct { line += String(format: " · BMS %.1f %%", t) }
+        log(line)
     }
 
     var decodedLocked: [(String, String)] {
