@@ -118,6 +118,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         UserDefaults.standard.removeObject(forKey: Self.driveKey)
         silentStop = true
         log("OBD: stopped until next drive (\(reason))")
+        huntReportLocked(force: true)
         disconnectLocked(reason: reason)
     }
 
@@ -152,6 +153,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     private func disconnectLocked(reason: String) {
         timer?.cancel(); timer = nil
+        hunt.save()
         central?.stopScan()
         if let p = peripheral, p.state != .disconnected {
             central?.cancelPeripheralConnection(p)
@@ -232,6 +234,11 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     /// Index into the non-power extra DIDs (temperatures etc.), read in turn.
     private var restIndex = 0
     private var drainUntil: Date?
+    /// Search for the traction-current identifier (read-only, during drives, survives restarts).
+    private var hunt = CurrentHunt.load()
+    private var lastHuntReport = Date()
+    /// Recent valid GPS speeds (m/s) for the acceleration of hunt samples.
+    private var speedHist: [(t: Date, v: Double)] = []
     private var connectedAt = Date()
     /// Set when the car went silent during a drive: no reconnect until the next drive start.
     private var silentStop = false
@@ -251,9 +258,29 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     func noteGPS(speed: Double, valid: Bool, at t: Date) {
         queue.async {
             self.lastFixAt = t
-            if valid && speed >= 0 { self.lastSpeedKmh = speed * 3.6 }
+            if valid && speed >= 0 {
+                self.lastSpeedKmh = speed * 3.6
+                self.speedHist.append((t, speed))
+                self.speedHist.removeAll { t.timeIntervalSince($0.t) > 8 }
+            }
             if valid && speed >= 1.5 { self.lastMovingAt = t; self.renewDriveLocked() }   // ~5 km/h
         }
+    }
+
+    /// Speed (m/s) and acceleration (m/s²) right now, from the last few GPS fixes.
+    private func motionLocked() -> (v: Double, a: Double)? {
+        guard let last = speedHist.last, Date().timeIntervalSince(last.t) < 3 else { return nil }
+        guard let first = speedHist.first(where: { last.t.timeIntervalSince($0.t) <= 4 }) else { return nil }
+        let dt = last.t.timeIntervalSince(first.t)
+        guard dt >= 1.5 else { return nil }
+        return (last.v, (last.v - first.v) / dt)
+    }
+
+    private func huntReportLocked(force: Bool = false) {
+        guard force || Date().timeIntervalSince(lastHuntReport) >= 5 * 60 else { return }
+        lastHuntReport = Date()
+        hunt.save()
+        hunt.report().forEach { log($0) }
     }
 
     private var movingNow: Bool {
@@ -574,29 +601,32 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                 self.stopDriveLocked(reason: "car silent for 20 s")
                 return
             }
-            // Periods (2 s ticks, 30 s cycle): 12 V every 30 s, SoC every 6 s, voltage every 10 s,
-            // 1E3D every 10 s, one of the remaining values every 30 s. 1 s ticks overloaded the
-            // dongle (26 Nov: only 11 answers in 30 s, then two timeouts and a stop). 1E3D turned
-            // out NOT to be the traction current (a steady ~5.5 A at any speed); it stays logged.
+            // Periods (2 s ticks, 30 s cycle): 12 V every 30 s, SoC every 6 s, voltage every 30 s,
+            // one of the remaining values every 30 s, and the current hunt in the other 7 slots.
+            // 1 s ticks overloaded the dongle (26 Nov: only 11 answers in 30 s, then two timeouts
+            // and a stop). 1E3D turned out NOT to be the traction current (steady ~5.5 A at any
+            // speed); the hunt below looks for the real one.
             guard self.tick % 2 == 0 else { return }
+            self.huntReportLocked()
             let slot = (self.tick / 2) % 15
             if slot == 0 {                               // 12 V (dongle only) – detects switch-off
                 self.send("ATRV")
             } else if slot % 3 == 1 {
                 self.send(Self.pollCommand) { reply in self.handlePoll(reply) }
-            } else if slot == 5 || slot == 11 || slot == 14 {
-                // Idle slots keep the bus quiet (SoC must stay prompt).
-                return
             } else {
                 let did: String
+                let isHunt: Bool
                 if slot == 8 {
                     let rest = Self.extraDIDs.filter { $0 != "1E3B" && $0 != "1E3D" }
                     did = rest[self.restIndex % rest.count]
                     self.restIndex += 1
-                } else if slot == 2 || slot == 12 {
-                    did = "1E3B"
+                    isHunt = false
+                } else if slot == 2 {
+                    did = "1E3B"; isHunt = false
+                } else if let h = self.hunt.nextDID() {
+                    did = h; isHunt = true
                 } else {
-                    did = "1E3D"
+                    did = "1E3D"; isHunt = false
                 }
                 self.send("22" + did) { reply in
                     let c = reply.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "\r", with: "")
@@ -604,6 +634,16 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                         self.extras[did] = String(c[r.upperBound...].prefix(16))
                         if did == "1E3B" { self.voltsAt = Date() }
                         if did == "1E3D" { self.addPowerSampleLocked() }
+                    }
+                    if isHunt {
+                        let m = self.motionLocked()
+                        self.hunt.record(did: did, payload: CurrentHunt.payload(reply: c, did: did),
+                                         speedMs: m?.v, accel: m?.a)
+                        if self.hunt.discoveryDone && !self.hunt.discoveryLogged {
+                            self.hunt.discoveryLogged = true
+                            self.log(self.hunt.respondersLine())
+                            self.hunt.save()
+                        }
                     }
                     // Only a success counts here (some extra values may be unsupported);
                     // missing answers are judged on the main SoC poll.
@@ -777,7 +817,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private func addPowerSampleLocked() {
         guard let rawA = extras["1E3D"], let a = u(rawA, bytes: 3),
               let rawV = extras["1E3B"], let v = u(rawV, bytes: 2).map({ $0 / 4 }),
-              let va = voltsAt, Date().timeIntervalSince(va) < 15 else { return }
+              let va = voltsAt, Date().timeIntervalSince(va) < 45 else { return }
         let now = Date()
         let kw = a / 100 * v / 1000
         let signedKw = (a >= 0x800000 ? a - 0x1000000 : a) / 100 * v / 1000
