@@ -231,6 +231,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var lastSpeedKmh: Double?
     /// Index into the non-power extra DIDs (temperatures etc.), read in turn.
     private var restIndex = 0
+    private var drainUntil: Date?
     private var connectedAt = Date()
     /// Set when the car went silent during a drive: no reconnect until the next drive start.
     private var silentStop = false
@@ -367,7 +368,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         carOn = false
         paused = true
         lastResidual = nil      // trust is earned again on every connection
-        powerWin = PowerWindow(); lastPowerAt = nil; energyKwh = 0; energySignedKwh = 0; voltsAt = nil
+        powerWin = PowerWindow(); lastPowerAt = nil; energyKwh = 0; energySignedKwh = 0; voltsAt = nil; drainUntil = nil
         state = "forbundet, finder kanal…"
         log("OBD: connected \(p.name ?? "?")")
         p.discoverServices(nil)
@@ -461,7 +462,11 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         queue.asyncAfter(deadline: .now() + 4) { [weak self] in
             guard let self, self.waiting == cmd else { return }
             self.waiting = nil; self.responseHandler = nil; self.rxBuffer = ""
-            if toCar { self.carAnswered(false) }
+            // Only the SoC poll judges whether the car answers. Extra values (voltage, current,
+            // temperatures) are slow or unsupported now and then; on 26 Nov two such timeouts
+            // stopped the dongle after a minute of driving. A late reply is drained, not counted.
+            if cmd == Self.pollCommand { self.carAnswered(false) }
+            self.drainUntil = Date().addingTimeInterval(2)
             self.sendNextLocked()
         }
     }
@@ -534,6 +539,10 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             guard self.driveActive else { self.disconnectLocked(reason: "no drive active"); return }
             guard self.ready, self.waiting == nil, self.pending.isEmpty,
                   !self.diagRunning, self.scanQueue.isEmpty else { return }
+            // Give a late answer to a timed-out request time to arrive and be thrown away, so it
+            // is never read as the answer to the next request.
+            if let d = self.drainUntil, Date() < d { return }
+            self.drainUntil = nil
             self.tick += 1
             // Stage 1: only log whether iOS reports CarPlay while we would talk to the car.
             CarPlayRoute.shared.logState(reason: "OBD poll")
@@ -565,20 +574,26 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                 self.stopDriveLocked(reason: "car silent for 20 s")
                 return
             }
-            // Periods (1 s ticks): 12 V every 15 s, SoC every 10 s, voltage every 5 s, one of the
-            // remaining values every 30 s, battery current in every other second (~1 Hz power).
-            let slot = self.tick % 30
-            if slot % 15 == 0 {                          // 12 V (dongle only) – detects switch-off
+            // Periods (2 s ticks, 30 s cycle): 12 V every 30 s, SoC every 6 s, voltage every 10 s,
+            // 1E3D every 10 s, one of the remaining values every 30 s. 1 s ticks overloaded the
+            // dongle (26 Nov: only 11 answers in 30 s, then two timeouts and a stop). 1E3D turned
+            // out NOT to be the traction current (a steady ~5.5 A at any speed); it stays logged.
+            guard self.tick % 2 == 0 else { return }
+            let slot = (self.tick / 2) % 15
+            if slot == 0 {                               // 12 V (dongle only) – detects switch-off
                 self.send("ATRV")
-            } else if slot % 10 == 3 {
+            } else if slot % 3 == 1 {
                 self.send(Self.pollCommand) { reply in self.handlePoll(reply) }
+            } else if slot == 5 || slot == 11 || slot == 14 {
+                // Idle slots keep the bus quiet (SoC must stay prompt).
+                return
             } else {
                 let did: String
-                if slot == 7 {
+                if slot == 8 {
                     let rest = Self.extraDIDs.filter { $0 != "1E3B" && $0 != "1E3D" }
                     did = rest[self.restIndex % rest.count]
                     self.restIndex += 1
-                } else if slot % 5 == 1 {
+                } else if slot == 2 || slot == 12 {
                     did = "1E3B"
                 } else {
                     did = "1E3D"
@@ -681,6 +696,8 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         let compact = reply.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "\r", with: "")
         lastRaw = String(compact.prefix(40))
         guard let r = compact.range(of: Self.pollMarker) else {
+            // An answer to another value (a late reply that slipped through) is not silence.
+            if compact.contains("621E") || compact.contains("622A") { return }
             carAnswered(false)
             failCount += 1
             state = "intet svar fra batteriet (\(compact.prefix(16)))"

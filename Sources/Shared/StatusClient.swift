@@ -123,8 +123,8 @@ enum StateProvider {
     /// Best available state: live from the Worker (or a < 15 s old live answer), else the last
     /// cached one, else nil. Background updates pass a longer timeout and retry on timeout.
     /// Maps gets the projected SoC while driving (VW reports only every few minutes), and never
-    /// a value that goes up again while not charging: when VW's next report is a little higher
-    /// than the projection, Maps keeps the lower value instead of jumping back (94 -> 95 on 23 Nov).
+    /// a projection that goes up again while not charging (94 -> 95 on 23 Nov). A real reading
+    /// (dongle or fresh VW value) always wins, also when it is higher than the projection.
     private static func forMaps(_ s: VehicleState) -> VehicleState {
         var v = s
         // Sanity check against VW: a dongle value far from the car's own recent value is wrong
@@ -150,7 +150,10 @@ enum StateProvider {
         // Keep the range in step with the SoC Maps gets. VW's range belongs to VW's (older) SoC;
         // sending the dongle's 47 % with VW's range from 52 % gave Maps two numbers that disagree,
         // and the range hardly moved between VW reports. Scale it to the SoC actually sent.
-        var out = MapsFloor.shared.apply(v)
+        // A real reading (dongle, or VW's own value from the last 5 min) may lift the floor:
+        // keeping the lower projection left Maps 1-2 pp below the dashboard for whole drives (26 Nov).
+        let real = v.obdLive == true || (v.socEstimated != true && Date().timeIntervalSince(v.measuredAt) < 5 * 60)
+        var out = MapsFloor.shared.apply(v, real: real)
         if let km = s.rangeKm, s.stateOfCharge > 0.03, abs(out.stateOfCharge - s.stateOfCharge) > 0.001 {
             out.rangeKm = max(0, (km * out.stateOfCharge / s.stateOfCharge).rounded())
         }
@@ -186,11 +189,12 @@ private final class MapsFloor: @unchecked Sendable {
     private let lock = NSLock()
     private var last: (soc: Double, at: Date)?
 
-    func apply(_ s: VehicleState) -> VehicleState {
+    func apply(_ s: VehicleState, real: Bool) -> VehicleState {
         lock.lock()
         defer { lock.unlock() }
-        // Charging, a real jump (> 2 pp, e.g. after charging) or a pause over 30 min starts afresh.
-        if s.isCharging || last == nil || Date().timeIntervalSince(last!.at) > 30 * 60
+        // Charging, a real reading, a jump (> 2 pp, e.g. after charging) or a pause over 30 min
+        // starts afresh. Only a projection is held down.
+        if s.isCharging || real || last == nil || Date().timeIntervalSince(last!.at) > 30 * 60
             || s.stateOfCharge > last!.soc + 0.02 || s.stateOfCharge <= last!.soc {
             last = (s.stateOfCharge, Date())
             return s
