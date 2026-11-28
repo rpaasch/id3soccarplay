@@ -171,6 +171,9 @@ extension VehicleProfile {
         }
     }
 
+    /// Extra consumption factor for Maps only (see `adjusted`). 2-3 pp missed of ~17 pp ≈ +15 %.
+    static let mapsConsumptionBias = 1.15
+
     /// Returns the adapted profile and a one-line description for the log.
     func adjusted(with hints: ModelHints?) -> (profile: VehicleProfile, note: String) {
         guard let hints else { return (self, "baseline profile (no model hints)") }
@@ -218,6 +221,17 @@ extension VehicleProfile {
                 ? "learned over \(Int(hints.learnedKm ?? 0)) km" : "car estimate"
             notes.append(String(format: "consumption %.1f kWh/100km (x%.2f, ", implied, factor) + source + ")")
         }
+
+        // Maps drains its arrival forecast slower than the car: on the ~55 km commute it says
+        // 2-3 pp too much at arrival (of ~17 pp used) and steps down each time a real SoC comes
+        // in (27 Nov). The hints themselves match the car, so Maps uses them more optimistically
+        // than modelled. Lift everything Maps gets by the observed gap, aux power included.
+        let mapsBias = Self.mapsConsumptionBias
+        consumptionParams = consumptionParams.scalingArray("vehicle_consumption_values_wh_per_m", by: mapsBias)
+        if let aux = consumptionParams.fields["vehicle_auxiliary_power_w"], case .number(let w) = aux {
+            consumptionParams = consumptionParams.replacingNumber("vehicle_auxiliary_power_w", with: w * mapsBias)
+        }
+        notes.append(String(format: "Maps bias x%.2f", mapsBias))
 
         // Charging power: baseline is for ~6 °C; the Worker supplies the temperature scale.
         if let scale = hints.chargePowerScale {
