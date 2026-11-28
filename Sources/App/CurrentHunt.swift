@@ -113,7 +113,7 @@ struct CurrentHunt: Codable {
         v * (1900 * a + 180 + 0.38 * v * v)
     }
 
-    private static func pearson(_ x: [Double], _ y: [Double]) -> Double? {
+    static func pearson(_ x: [Double], _ y: [Double]) -> Double? {
         let n = Double(x.count)
         guard x.count >= 3, x.count == y.count else { return nil }
         let mx = x.reduce(0, +) / n, my = y.reduce(0, +) / n
@@ -124,7 +124,7 @@ struct CurrentHunt: Codable {
     }
 
     /// Readings of the data bytes: name -> value.
-    private static func readings(_ hex: String) -> [(String, Double)] {
+    static func readings(_ hex: String) -> [(String, Double)] {
         var out: [(String, Double)] = []
         for bytes in [2, 3, 4] where hex.count >= bytes * 2 {
             guard let u = UInt64(hex.prefix(bytes * 2), radix: 16) else { continue }

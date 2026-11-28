@@ -60,6 +60,9 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         var scanProgress: String?
         /// Battery output (kW) from the energy counter during this drive, oldest first.
         var power: [PowerPoint] = []
+        /// The survey of the car's other control units: progress and the values found.
+        var survey: String?
+        var surveyValues: [OBDDecoded] = []
     }
 
     /// Asks the battery controller for ~180 data identifiers once and logs every positive answer,
@@ -156,6 +159,8 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private func disconnectLocked(reason: String) {
         timer?.cancel(); timer = nil
         hunt.save()
+        survey.save()
+        headerForeign = false
         endEnergyDriveLocked()
         central?.stopScan()
         if let p = peripheral, p.state != .disconnected {
@@ -239,6 +244,11 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var drainUntil: Date?
     /// Search for the traction-current identifier (read-only, during drives, survives restarts).
     private var hunt = CurrentHunt.load()
+    /// Survey of the other control units (read-only, during drives, survives restarts).
+    private var survey = BusSurvey.load()
+    /// The dongle is addressed to another unit than the BMS: restore before the next request.
+    private var headerForeign = false
+    private static let bmsHeader = ["ATSH17FC007B", "ATCRA17FE007B"]
     private var lastHuntReport = Date()
     /// Recent valid GPS speeds (m/s) for the acceleration of hunt samples.
     private var speedHist: [(t: Date, v: Double)] = []
@@ -293,6 +303,8 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         lastHuntReport = Date()
         hunt.save()
         hunt.report().forEach { log($0) }
+        survey.save()
+        survey.report().forEach { log($0) }
     }
 
     private var movingNow: Bool {
@@ -314,7 +326,8 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                decoded: decodedLocked.map { OBDDecoded(label: $0.0, value: $0.1) },
                firmware: firmware, volt12: volt12, lastAnswer: lastAnswer, okCount: okCount, failCount: failCount,
                extras: Self.extraDIDs.compactMap { d in extras[d].map { OBDExtra(did: d, hex: $0) } }, scanProgress: scanProgress,
-               power: powerSeries)
+               power: powerSeries, survey: survey.progress,
+               surveyValues: survey.shown.map { OBDDecoded(label: $0.0, value: $0.1) })
     }
 
     private func log(_ s: String) { SharedLog.shared.log(s, category: "obd") }
@@ -583,6 +596,14 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             // is never read as the answer to the next request.
             if let d = self.drainUntil, Date() < d { return }
             self.drainUntil = nil
+            // A survey read went to another unit: address the BMS again before anything else
+            // (also after a timeout, when the survey's own reply handler never ran).
+            if self.headerForeign {
+                self.headerForeign = false
+                self.pending = Self.bmsHeader
+                self.sendNextLocked()
+                return
+            }
             self.tick += 1
             // Stage 1: only log whether iOS reports CarPlay while we would talk to the car.
             CarPlayRoute.shared.logState(reason: "OBD poll")
@@ -640,6 +661,8 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                     isHunt = false
                 } else if slot == 2 {
                     did = "1E3B"; isHunt = false
+                } else if (slot == 6 || slot == 12), self.surveyLocked() {
+                    return                               // other control units, every 15 s
                 } else if let h = self.hunt.nextDID() {
                     did = h; isHunt = true
                 } else {
@@ -673,6 +696,43 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         }
         t.resume()
         timer = t
+    }
+
+    /// One survey request (see BusSurvey). Returns false when the survey has nothing to ask.
+    /// Another unit is addressed with dongle settings only (ATSH/ATCRA); the tick restores the
+    /// BMS address right after (headerForeign).
+    private func surveyLocked() -> Bool {
+        guard let req = survey.next() else { return false }
+        let ecu = req.ecu, did = req.did, kind = req.kind
+        let read = {
+            self.send("22" + did) { reply in
+                switch kind {
+                case .unit:
+                    let before = self.survey.ecus.count
+                    self.survey.recordUnit(ecu: ecu, reply: reply)
+                    if self.survey.ecus.count > before {
+                        self.log("OBD survey: unit at 17FC00\(ecu) answers (part no. \(self.survey.ecus[ecu] ?? "?"))")
+                    }
+                    if self.survey.unitsDone { self.huntReportLocked(force: true) }
+                case .value, .track:
+                    let m = self.motionLocked()
+                    let isNew = self.survey.responders[ecu + ":" + did] == nil
+                    let hex = self.survey.recordValue(ecu: ecu, did: did, reply: reply, v: m?.v, a: m?.a, e: self.roadEnergyWh)
+                    if isNew, self.survey.responders[ecu + ":" + did] != nil {
+                        self.log("OBD survey value \(ecu):\(did) = \(hex ?? self.survey.names[ecu] ?? "")")
+                    }
+                }
+                // The BMS answering counts as the car answering; other units may stay silent.
+                if ecu == BusSurvey.homeEcu, BusSurvey.compact(reply).contains("17FE007B") { self.carAnswered(true) }
+            }
+        }
+        if ecu == BusSurvey.homeEcu {
+            read()
+        } else {
+            headerForeign = true
+            send("ATSH17FC00" + ecu) { _ in self.send("ATCRA17FE00" + ecu) { _ in read() } }
+        }
+        return true
     }
 
     private func runCandidatesLocked(index: Int) {

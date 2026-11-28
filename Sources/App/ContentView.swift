@@ -513,6 +513,15 @@ struct ContentView: View {
                 if let v = obd.volt12 { row("12 V-batteri", v) }
                 if let t = obd.lastAnswer { row("Sidste svar", t.formatted(date: .omitted, time: .standard)) }
                 if let c = obd.calibration { Text("Kalibrering: \(c)").font(.fig(.caption)).foregroundStyle(.secondary) }
+                if let sv = obd.survey { row("Styreenheder", sv) }
+                if !obd.surveyValues.isEmpty {
+                    NavigationLink {
+                        List(obd.surveyValues) { d in row(d.label, d.value) }
+                            .navigationTitle("Bilens værdier")
+                    } label: {
+                        Label("Fundne værdier (\(obd.surveyValues.count))", systemImage: "list.bullet.rectangle")
+                    }
+                }
                 Button("Opdater") { obd = OBDManager.shared.status() }
             }
         } header: {
