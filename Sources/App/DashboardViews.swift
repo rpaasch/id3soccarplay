@@ -147,7 +147,8 @@ struct StatusChip: View {
     }
 }
 
-/// Maps' consumption per speed bin (kWh/100 km incl. heating) as small bars.
+/// Consumption per speed bin as small bars: kWh/100 km incl. heating (what Maps uses), or kW
+/// per hour with a bar for standing still (what the car draws).
 struct SpeedBinsChart: View {
     let bins: [Double]       // 10 bins, traction only
     let auxW: Double
@@ -177,7 +178,23 @@ struct SpeedBinsChart: View {
     /// Heating's share per 100 km: the same kW, but the slower you go, the longer each km takes.
     static func heating(auxW: Double, index i: Int) -> Double { auxW / 1000 / mids[i] * 100 }
 
+    /// What the bars show: energy per distance (what Maps uses) or power per hour (what the car draws).
+    enum Unit: String, CaseIterable, Identifiable {
+        case perKm = "pr. 100 km"
+        case perHour = "pr. time"
+        var id: String { rawValue }
+    }
+    @State private var unit: Unit = .perKm
+
+    /// How long the cold-start extra lasts (the Worker's WARMUP_H).
+    static let warmupHours = 0.25
+
     private var parts: [Part] {
+        unit == .perKm ? perKmParts : perHourParts
+    }
+
+    /// kWh/100 km: heating spread over the km, so slow speeds carry a big share of it.
+    private var perKmParts: [Part] {
         Self.mids.indices.flatMap { i -> [Part] in
             let label = "\(Int(Self.mids[i]))"
             let drive = bins[i]
@@ -195,15 +212,46 @@ struct SpeedBinsChart: View {
         }
     }
 
+    /// kW: heating is the same band at every speed, standing still included; driving grows on top.
+    /// The cold-start extra is a one-off per trip, so it is not in these bars (see the note).
+    private var perHourParts: [Part] {
+        let heat = max(0, auxW - coldW) / 1000
+        // Heating first in every bar, so it is the bottom band and standing still is just that band.
+        let still = [Part(id: "0h", label: "0", kind: Self.heatingLabel, kwh: heat, total: heat, top: true)]
+        return still + Self.mids.indices.flatMap { i -> [Part] in
+            let label = "\(Int(Self.mids[i]))"
+            let drive = bins[i] / 100 * Self.mids[i]
+            let total = drive + heat
+            return [
+                Part(id: "\(i)h", label: label, kind: Self.heatingLabel, kwh: heat, total: total, top: false),
+                Part(id: "\(i)d", label: label, kind: Self.drivingLabel, kwh: drive, total: total, top: true),
+            ]
+        }
+    }
+
+    private func totalText(_ v: Double) -> String {
+        unit == .perHour && v < 10 ? DK.num(v, 1) : "\(Int(v.rounded()))"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("kWh pr. 100 km ved hver fart").font(.fig(.caption2)).foregroundStyle(.secondary)
+            HStack {
+                Text(unit == .perKm ? "kWh pr. 100 km ved hver fart" : "kW, bilen bruger ved hver fart")
+                    .font(.fig(.caption2)).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Picker("Vis", selection: $unit) {
+                    ForEach(Unit.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .controlSize(.mini)
+                .fixedSize()
+            }
             Chart(parts) { p in
-                BarMark(x: .value("km/t", p.label), y: .value("kWh/100 km", p.kwh), width: .ratio(0.6))
+                BarMark(x: .value("km/t", p.label), y: .value(unit == .perKm ? "kWh/100 km" : "kW", p.kwh), width: .ratio(0.6))
                     .foregroundStyle(by: .value("Del", p.kind))
                     .annotation(position: .top, spacing: 2) {
                         if p.top {
-                            Text("\(Int(p.total.rounded()))").font(.fig(.caption2).monospacedDigit()).foregroundStyle(.secondary)
+                            Text(totalText(p.total)).font(.fig(.caption2).monospacedDigit()).foregroundStyle(.secondary)
                         }
                     }
             }
@@ -217,20 +265,31 @@ struct SpeedBinsChart: View {
                 AxisMarks { _ in AxisValueLabel().font(.fig(.caption2)) }
             }
             .frame(height: 130)
+            .animation(.easeInOut(duration: 0.25), value: unit)
             Text("km/t").font(.fig(.caption2)).foregroundStyle(.tertiary).frame(maxWidth: .infinity, alignment: .trailing)
             Text(note)
                 .font(.fig(.caption2)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Forbrug efter fart, som Maps regner med, delt i kørsel og varme")
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(unit == .perKm
+            ? "Forbrug pr. 100 km efter fart, som Maps regner med, delt i kørsel og varme"
+            : "Effekt i kilowatt efter fart, delt i kørsel og varme. Varmen er den samme, også når bilen holder stille")
     }
 
     private var note: String {
-        let steady = (auxW - coldW) / 1000
-        var s = "Varmen bruger ca. \(DK.num(steady, 1)) kW, uanset fart. Kører du langsomt, tager hver km længere tid, så varmens andel pr. km bliver stor. Pr. time bruger bilen ved 10 km/t kun ca. \(DK.num(bins[0] / 10 + auxW / 1000, 1)) kW mod \(DK.num(auxW / 1000, 1)) kW, når den holder stille."
-        if coldW > 0 {
-            s += " Bilen er kold lige nu, så Maps får \(DK.num(coldW / 1000, 1)) kW ekstra, til den er varmet op (ca. de første 15 min)."
+        let steady = max(0, auxW - coldW) / 1000
+        var s: String
+        if unit == .perKm {
+            s = "Det er de tal, Maps regner rækkevidde med. Varmen bruger ca. \(DK.num(steady, 1)) kW, uanset fart. Kører du langsomt, tager hver km længere tid, så varmen fylder meget pr. km. Det er tiden, ikke farten, der koster ved lav fart. Skift til \"pr. time\" for at se det."
+            if coldW > 0 {
+                s += " Bilen er kold lige nu, så Maps får \(DK.num(coldW / 1000, 1)) kW ekstra, til den er varmet op (ca. de første 15 min)."
+            }
+        } else {
+            s = "Varmen koster det samme hver time, også når bilen holder stille (\(DK.num(steady, 1)) kW). Kørslen kommer oven i og vokser med farten. Ved 10 km/t bruger bilen ca. \(DK.num(bins[0] / 10 + steady, 1)) kW i alt."
+            if coldW > 0 {
+                s += " Koldstart er en engangsudgift: ca. \(DK.num(coldW / 1000 * Self.warmupHours, 1)) kWh de første 15 min af turen, når bilen har holdt stille i over en time."
+            }
         }
         return s
     }
