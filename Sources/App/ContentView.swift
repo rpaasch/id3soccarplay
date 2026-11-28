@@ -29,6 +29,8 @@ struct ContentView: View {
     @State private var bands: [TempBand] = []
     @State private var gpsOn = GPSRecorder.shared.enabled
     @State private var gpsNote = ""
+    /// Regular on wide screens: the foldable iPhone's inner display, landscape on big phones, iPad.
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
         TabView {
@@ -49,10 +51,28 @@ struct ContentView: View {
 
     // MARK: Tabs
 
-    private func scrollPage<C: View>(@ViewBuilder _ content: () -> C) -> some View {
-        ScrollView {
+    /// One column on a phone. On a wide screen (foldable inner display, landscape) the cards flow
+    /// into columns of at least 380 pt; pages that read top to bottom (`grid: false`, e.g. trips
+    /// grouped by day) keep one column but at a readable width instead of stretching edge to edge.
+    @ViewBuilder private func pageLayout<C: View>(grid: Bool, @ViewBuilder _ content: () -> C) -> some View {
+        if sizeClass == .regular && grid {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 380), spacing: 14, alignment: .top)],
+                      alignment: .leading, spacing: 14) { content() }
+                .padding(.horizontal, 20).padding(.vertical, 12)
+        } else if sizeClass == .regular {
+            VStack(spacing: 14) { content() }
+                .frame(maxWidth: 760)
+                .padding(.horizontal, 20).padding(.vertical, 12)
+                .frame(maxWidth: .infinity)
+        } else {
             VStack(spacing: 14) { content() }
                 .padding(.horizontal, 16).padding(.vertical, 8)
+        }
+    }
+
+    private func scrollPage<C: View>(grid: Bool = true, @ViewBuilder _ content: () -> C) -> some View {
+        ScrollView {
+            pageLayout(grid: grid, content)
         }
         .background(Color(.systemGroupedBackground))
         .refreshable { reload(); await Task { await refreshLive() }.value } // own task: SwiftUI cancels the refresh task when the view redraws
@@ -211,7 +231,7 @@ struct ContentView: View {
     }
 
     private var tripsTab: some View {
-        scrollPage {
+        scrollPage(grid: false) {
             if trips.isEmpty {
                 Card { Text(tripsNote.isEmpty ? "Ingen ture endnu. En tur logges, når bilen har kørt mindst 5 km." : tripsNote).foregroundStyle(.secondary) }
             } else {
