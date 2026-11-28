@@ -45,142 +45,236 @@ struct PowerChart: View {
     }
 }
 
-/// Four charts over all trips: how close Maps was, consumption over time, and consumption
-/// against temperature and speed. Two columns on wide screens (the foldable's inner display).
+/// Four explorable charts over all trips: touch or drag on a chart to see that trip's details.
+/// Two columns on wide screens (the foldable's inner display).
 struct TripCharts: View {
     let trips: [Trip]
 
-    private var chrono: [Trip] { trips.sorted { $0.start < $1.start } }
-    private var counted: [Trip] { chrono.filter(\.isCounted) }
+    private var counted: [Trip] { trips.filter(\.isCounted).sorted { $0.start < $1.start } }
 
     var body: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 330), spacing: 14, alignment: .top)], spacing: 14) {
-            if counted.count >= 2 { accuracyCard }
-            if counted.count >= 2 { overTimeCard }
-            if counted.contains(where: { $0.tempC != nil }) { temperatureCard }
-            if counted.contains(where: { $0.avgKmh != nil }) { speedCard }
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 14, alignment: .top)], spacing: 14) {
+            if counted.count >= 2 {
+                AccuracyChart(trips: Array(counted.suffix(40)))
+                OverTimeChart(trips: counted)
+            }
+            if counted.contains(where: { $0.tempC != nil }) {
+                ScatterChart(trips: counted.filter { $0.tempC != nil }, title: "Forbrug og temperatur", symbol: "thermometer.medium",
+                             xLabel: "udetemperatur, °C", x: { $0.tempC ?? 0 },
+                             note: "Hver prik er en tur. Tryk eller træk for at se turen. Farven viser, om Maps ramte.")
+            }
+            if counted.contains(where: { $0.avgKmh != nil }) {
+                ScatterChart(trips: counted.filter { $0.avgKmh != nil }, title: "Forbrug og fart", symbol: "speedometer",
+                             xLabel: "gennemsnitsfart, km/t", x: { $0.avgKmh ?? 0 },
+                             note: "Langsomme ture bruger mere pr. km om vinteren, fordi varmen kører, uanset hvor langt bilen kommer.")
+            }
         }
     }
+}
 
-    // MARK: Maps accuracy per trip
+/// How far a trip's real consumption was from Maps' (+ = used more).
+private func deviation(_ t: Trip) -> Double { (t.vsMaps - 1) * 100 }
 
-    private func pct(_ t: Trip) -> Double { (t.vsMaps - 1) * 100 }
+private func hitColor(_ t: Trip) -> Color {
+    let p = deviation(t)
+    return abs(p) <= 5 ? .green : (p > 0 ? .orange : .blue)
+}
 
-    private func accuracyColor(_ p: Double) -> Color {
-        abs(p) <= 5 ? .green : (p > 0 ? .orange : .blue)
+/// The details of one trip, shown above a chart while it is touched.
+private struct TripBubble: View {
+    let trip: Trip
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(trip.startDate.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute().locale(DK.locale)))
+                .font(.caption.weight(.semibold))
+            Text("\(DK.num(trip.km, 0)) km · brugte \(DK.num(trip.kwhPer100, 1)) · Maps \(DK.num(trip.mapsValue, 1)) kWh/100 km")
+                .font(.caption2).monospacedDigit()
+            HStack(spacing: 8) {
+                Text((deviation(trip) >= 0 ? "+" : "") + "\(Int(deviation(trip).rounded())) %").foregroundStyle(hitColor(trip)).bold()
+                if let c = trip.tempC { Text("\(DK.num(c, 0)) °C") }
+                if let v = trip.avgKmh { Text("\(DK.num(v, 0)) km/t") }
+            }
+            .font(.caption2).monospacedDigit()
+        }
+        .padding(8)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .shadow(color: .black.opacity(0.08), radius: 4, y: 2)
     }
+}
 
-    private var accuracyCard: some View {
-        let shown = Array(counted.suffix(30))
-        let within = shown.filter { abs(pct($0)) <= 5 }.count
-        return Card(title: "Ramte Maps forbruget?", symbol: "target") {
+/// Placeholder line under a chart: the selected trip, or a hint to touch the chart.
+private struct SelectionLine: View {
+    let trip: Trip?
+    let hint: String
+    var body: some View {
+        Group {
+            if let t = trip { TripBubble(trip: t) } else {
+                Label(hint, systemImage: "hand.tap").font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+        .animation(.easeOut(duration: 0.15), value: trip?.id)
+    }
+}
+
+/// One bar per trip: how far the real consumption was from what Maps was told.
+private struct AccuracyChart: View {
+    let trips: [Trip]
+    @State private var selected: String?
+
+    private func key(_ i: Int) -> String { String(i) }
+    private var selectedTrip: Trip? { selected.flatMap(Int.init).flatMap { trips.indices.contains($0) ? trips[$0] : nil } }
+
+    var body: some View {
+        let within = trips.filter { abs(deviation($0)) <= 5 }.count
+        let span = max(15, (trips.map { abs(deviation($0)) }.max() ?? 15) + 5)
+        Card(title: "Ramte Maps forbruget?", symbol: "target") {
             Chart {
-                ForEach(Array(shown.enumerated()), id: \.element.id) { i, t in
-                    BarMark(x: .value("Tur", i + 1), y: .value("Afvigelse", pct(t)), width: .ratio(0.7))
-                        .foregroundStyle(accuracyColor(pct(t)))
-                }
-                RuleMark(y: .value("Nul", 0)).foregroundStyle(.secondary)
                 ForEach([-5.0, 5.0], id: \.self) { y in
                     RuleMark(y: .value("Grænse", y))
-                        .foregroundStyle(.green.opacity(0.6))
+                        .foregroundStyle(Color.green.opacity(0.6))
                         .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
                 }
+                ForEach(Array(trips.enumerated()), id: \.element.id) { i, t in
+                    BarMark(x: .value("Tur", key(i)), y: .value("Afvigelse", deviation(t)))
+                        .foregroundStyle(hitColor(t).opacity(selected == nil || selected == key(i) ? 1 : 0.35))
+                        .cornerRadius(3)
+                }
+                RuleMark(y: .value("Nul", 0)).foregroundStyle(Color.secondary.opacity(0.6))
             }
+            .chartXSelection(value: $selected)
+            .chartYScale(domain: -span...span)
             .chartXAxis(.hidden)
             .chartYAxis {
-                AxisMarks(values: .automatic(desiredCount: 5)) { v in
-                    AxisGridLine()
-                    AxisValueLabel { if let x = v.as(Double.self) { Text("\(Int(x)) %") } }
+                AxisMarks(position: .leading, values: .automatic(desiredCount: 5)) { v in
+                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(Color.secondary.opacity(0.25))
+                    AxisValueLabel { if let x = v.as(Double.self) { Text("\(x > 0 ? "+" : "")\(Int(x)) %") } }
                 }
             }
-            .frame(height: 150)
-            Text("Hver søjle er en tur, ældste til venstre. Over nul brugte bilen mere, end Maps regnede med. \(within) af \(shown.count) ture ramte inden for ±5 % (mellem de grønne streger).")
+            .frame(height: 170)
+            SelectionLine(trip: selectedTrip, hint: "Træk hen over søjlerne for at se hver tur")
+            Text("Ældste tur til venstre. Over nul brugte bilen mere, end Maps regnede med. \(within) af \(trips.count) ture ramte inden for ±5 % (mellem de grønne streger).")
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Used vs Maps per trip over time; scroll sideways for older trips, touch for details.
+private struct OverTimeChart: View {
+    let trips: [Trip]
+    @State private var selectedDate: Date?
+
+    private var selectedTrip: Trip? {
+        guard let d = selectedDate else { return nil }
+        return trips.min { abs($0.startDate.timeIntervalSince(d)) < abs($1.startDate.timeIntervalSince(d)) }
     }
 
-    // MARK: Used vs Maps over time
-
-    private var overTimeCard: some View {
-        let shown = Array(counted.suffix(30))
-        return Card(title: "Forbrug over tid", symbol: "chart.line.uptrend.xyaxis") {
+    var body: some View {
+        let top = (trips.flatMap { [$0.kwhPer100, $0.mapsValue] }.max() ?? 30) * 1.15
+        Card(title: "Forbrug over tid", symbol: "chart.line.uptrend.xyaxis") {
             Chart {
-                ForEach(shown) { t in
-                    LineMark(x: .value("Dato", t.startDate), y: .value("kWh/100 km", t.kwhPer100), series: .value("Hvad", "Brugte"))
-                        .foregroundStyle(by: .value("Hvad", "Brugte"))
-                    PointMark(x: .value("Dato", t.startDate), y: .value("kWh/100 km", t.kwhPer100))
-                        .foregroundStyle(by: .value("Hvad", "Brugte"))
-                        .symbolSize(20)
+                ForEach(trips) { t in
                     LineMark(x: .value("Dato", t.startDate), y: .value("kWh/100 km", t.mapsValue), series: .value("Hvad", "Maps"))
                         .foregroundStyle(by: .value("Hvad", "Maps"))
                         .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 3]))
+                        .interpolationMethod(.monotone)
+                    LineMark(x: .value("Dato", t.startDate), y: .value("kWh/100 km", t.kwhPer100), series: .value("Hvad", "Brugte"))
+                        .foregroundStyle(by: .value("Hvad", "Brugte"))
+                        .interpolationMethod(.monotone)
+                    PointMark(x: .value("Dato", t.startDate), y: .value("kWh/100 km", t.kwhPer100))
+                        .foregroundStyle(hitColor(t))
+                        .symbolSize(selectedTrip?.id == t.id ? 120 : 30)
+                }
+                if let t = selectedTrip {
+                    RuleMark(x: .value("Valgt", t.startDate)).foregroundStyle(Color.secondary.opacity(0.4))
                 }
             }
             .chartForegroundStyleScale(["Brugte": Color.primary, "Maps": Color.teal])
             .chartLegend(position: .top, alignment: .leading)
-            .chartYAxisLabel("kWh/100 km")
+            .chartYScale(domain: 0...top)
+            .chartXSelection(value: $selectedDate)
+            .chartScrollableAxes(.horizontal)
+            .chartXVisibleDomain(length: 14 * 24 * 3600)
+            .chartScrollPosition(initialX: (trips.last?.startDate ?? .now).addingTimeInterval(-13 * 24 * 3600))
             .chartXAxis {
-                AxisMarks(values: .automatic(desiredCount: 4)) { _ in
-                    AxisGridLine()
+                AxisMarks(values: .stride(by: .day, count: 2)) { _ in
+                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(Color.secondary.opacity(0.25))
                     AxisValueLabel(format: .dateTime.day().month(.abbreviated).locale(DK.locale))
                 }
             }
-            .frame(height: 170)
-            Text("Jo tættere de to linjer ligger, jo bedre passer Maps' rækkevidde og ankomstprocent.")
-                .font(.caption2).foregroundStyle(.secondary)
-        }
-        .accessibilityElement(children: .combine)
-    }
-
-    // MARK: Consumption vs temperature / speed
-
-    private var temperatureCard: some View {
-        let shown = counted.filter { $0.tempC != nil }
-        return Card(title: "Forbrug og temperatur", symbol: "thermometer.medium") {
-            Chart(shown) { t in
-                PointMark(x: .value("°C", t.tempC ?? 0), y: .value("kWh/100 km", t.kwhPer100))
-                    .foregroundStyle(accuracyColor(pct(t)))
-                    .symbolSize(max(20, min(160, t.km * 2)))
+            .chartYAxis {
+                AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { _ in
+                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(Color.secondary.opacity(0.25))
+                    AxisValueLabel()
+                }
             }
-            .chartXAxisLabel("°C")
-            .chartYAxisLabel("kWh/100 km")
-            .frame(height: 170)
-            Text("Hver prik er en tur; større prik = længere tur. Farven viser, om Maps ramte (grøn), tog for lidt (orange) eller for meget (blå).")
+            .frame(height: 190)
+            SelectionLine(trip: selectedTrip, hint: "Rul til siden for ældre ture, tryk for detaljer")
+            Text("kWh pr. 100 km. Jo tættere de to linjer ligger, jo bedre passer Maps' rækkevidde og ankomstprocent.")
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Consumption against one trip property (temperature or speed); touch for the nearest trip.
+private struct ScatterChart: View {
+    let trips: [Trip]
+    let title: String
+    let symbol: String
+    let xLabel: String
+    let x: (Trip) -> Double
+    let note: String
+    @State private var selectedX: Double?
+
+    private var selectedTrip: Trip? {
+        guard let v = selectedX else { return nil }
+        return trips.min { abs(x($0) - v) < abs(x($1) - v) }
     }
 
-    private var speedCard: some View {
-        let shown = counted.filter { $0.avgKmh != nil }
-        return Card(title: "Forbrug og fart", symbol: "speedometer") {
-            Chart(shown) { t in
-                PointMark(x: .value("km/t", t.avgKmh ?? 0), y: .value("kWh/100 km", t.kwhPer100))
-                    .foregroundStyle(by: .value("Temperatur", tempBucket(t.tempC)))
-                    .symbolSize(max(20, min(160, t.km * 2)))
+    var body: some View {
+        let xs = trips.map(x)
+        let lo = (xs.min() ?? 0), hi = (xs.max() ?? 1)
+        let pad = max(1, (hi - lo) * 0.08)
+        let top = (trips.map(\.kwhPer100).max() ?? 30) * 1.15
+        Card(title: title, symbol: symbol) {
+            Chart {
+                ForEach(trips) { t in
+                    PointMark(x: .value(xLabel, x(t)), y: .value("kWh/100 km", t.kwhPer100))
+                        .foregroundStyle(hitColor(t).opacity(selectedTrip == nil || selectedTrip?.id == t.id ? 0.9 : 0.3))
+                        .symbolSize(selectedTrip?.id == t.id ? 160 : 55)
+                }
+                if let t = selectedTrip {
+                    RuleMark(x: .value("Valgt", x(t))).foregroundStyle(Color.secondary.opacity(0.4))
+                }
             }
-            .chartForegroundStyleScale(["under 0 °C": Color.blue, "0–5 °C": Color.cyan, "5–10 °C": Color.teal, "over 10 °C": Color.orange, "ukendt": Color.gray])
-            .chartLegend(position: .top, alignment: .leading)
-            .chartXAxisLabel("gennemsnitsfart, km/t")
-            .chartYAxisLabel("kWh/100 km")
+            .chartXSelection(value: $selectedX)
+            .chartXScale(domain: (lo - pad)...(hi + pad))
+            .chartYScale(domain: 0...top)
+            .chartXAxisLabel(xLabel, alignment: .trailing)
+            .chartYAxis {
+                AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { _ in
+                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(Color.secondary.opacity(0.25))
+                    AxisValueLabel()
+                }
+            }
+            .chartXAxis {
+                AxisMarks(values: .automatic(desiredCount: 5)) { _ in
+                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(Color.secondary.opacity(0.25))
+                    AxisValueLabel()
+                }
+            }
             .frame(height: 170)
-            Text("Langsomme ture bruger mere pr. km om vinteren, fordi varmen kører, uanset hvor langt bilen kommer.")
-                .font(.caption2).foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                ForEach([("Maps ramte", Color.green), ("brugte mere", Color.orange), ("brugte mindre", Color.blue)], id: \.0) { l in
+                    HStack(spacing: 4) { Circle().fill(l.1).frame(width: 8, height: 8); Text(l.0) }
+                }
+            }
+            .font(.caption2).foregroundStyle(.secondary)
+            SelectionLine(trip: selectedTrip, hint: "Træk hen over grafen for at se hver tur")
+            Text(note).font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-        }
-        .accessibilityElement(children: .combine)
-    }
-
-    private func tempBucket(_ c: Double?) -> String {
-        guard let c else { return "ukendt" }
-        switch c {
-        case ..<0: return "under 0 °C"
-        case ..<5: return "0–5 °C"
-        case ..<10: return "5–10 °C"
-        default: return "over 10 °C"
         }
     }
 }

@@ -88,6 +88,50 @@ struct BatteryRing: View {
     }
 }
 
+/// Lays its children out left to right and wraps to a new line when the width runs out.
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = arrange(width: proposal.width ?? .infinity, subviews: subviews)
+        let w = rows.map(\.width).max() ?? 0
+        let h = rows.map(\.height).reduce(0, +) + spacing * CGFloat(max(0, rows.count - 1))
+        return CGSize(width: proposal.width.map { min($0, w) } ?? w, height: h)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in arrange(width: bounds.width, subviews: subviews) {
+            var x = bounds.minX
+            for i in row.items {
+                let size = subviews[i].sizeThatFits(.unspecified)
+                subviews[i].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += row.height + spacing
+        }
+    }
+
+    private struct Row { var items: [Int] = []; var width: CGFloat = 0; var height: CGFloat = 0 }
+
+    private func arrange(width: CGFloat, subviews: Subviews) -> [Row] {
+        var rows: [Row] = []
+        var cur = Row()
+        for i in subviews.indices {
+            let size = subviews[i].sizeThatFits(.unspecified)
+            let add = cur.items.isEmpty ? size.width : cur.width + spacing + size.width
+            if add > width, !cur.items.isEmpty {
+                rows.append(cur)
+                cur = Row(items: [i], width: size.width, height: size.height)
+            } else {
+                cur.items.append(i); cur.width = add; cur.height = max(cur.height, size.height)
+            }
+        }
+        if !cur.items.isEmpty { rows.append(cur) }
+        return rows
+    }
+}
+
 /// Small capsule showing a status.
 struct StatusChip: View {
     let text: String

@@ -37,6 +37,9 @@ private struct Fix: Sendable {
     let speedAcc: Double   // m/s, < 0 when invalid
     let alt: Double
     let vAcc: Double       // < 0 when invalid
+    let lat: Double
+    let lon: Double
+    let hAcc: Double       // < 0 when invalid
 }
 
 @MainActor
@@ -58,6 +61,12 @@ final class GPSRecorder: NSObject, CLLocationManagerDelegate {
     private var lastMoving: Date?
     private var idleTail = 0.0                     // seconds standing still at the end of the segment
     private var refAlt: Double?
+    /// Where the current segment started and the last good position, for the phone's own drive
+    /// log (Kørebog). Kept on the phone only; never part of the upload.
+    private var segFrom: LogPlace?
+    private var lastPlace: LogPlace?
+    /// Last good position before the segment started (the parking spot you drove off from).
+    private var parkedPlace: LogPlace?
 
     private(set) var lastUploadNote = ""
 
@@ -136,7 +145,8 @@ final class GPSRecorder: NSObject, CLLocationManagerDelegate {
             OBDManager.shared.noteGPS(speed: l.speed, valid: l.speed >= 0 && (l.speedAccuracy < 0 || l.speedAccuracy < 3), at: l.timestamp)
         }
         let fixes = locations.map {
-            Fix(t: $0.timestamp, speed: $0.speed, speedAcc: $0.speedAccuracy, alt: $0.altitude, vAcc: $0.verticalAccuracy)
+            Fix(t: $0.timestamp, speed: $0.speed, speedAcc: $0.speedAccuracy, alt: $0.altitude, vAcc: $0.verticalAccuracy,
+                lat: $0.coordinate.latitude, lon: $0.coordinate.longitude, hAcc: $0.horizontalAccuracy)
         }
         Task { @MainActor in self.handle(fixes) }
     }
@@ -179,10 +189,16 @@ final class GPSRecorder: NSObject, CLLocationManagerDelegate {
     private func add(_ f: Fix) {
         let validSpeed = f.speed >= 0 && (f.speedAcc < 0 || f.speedAcc < 3)
         let moving = validSpeed && f.speed >= Self.movingMps
+        if f.hAcc >= 0 && f.hAcc < 100 {
+            let p = LogPlace(lat: f.lat, lon: f.lon)
+            lastPlace = p
+            if seg == nil { parkedPlace = p }
+        }
         if moving {
             lastMoving = f.t
             if seg == nil {
                 seg = GPSSegment(start: f.t, end: f.t)
+                segFrom = parkedPlace ?? lastPlace
                 idleTail = 0
                 refAlt = nil
                 SharedLog.shared.log("GPS: driving started", category: "gps")
@@ -220,6 +236,8 @@ final class GPSRecorder: NSObject, CLLocationManagerDelegate {
         if let lm = lastMoving, lm < s.end { s.end = lm }
         idleTail = 0
         guard s.km >= 1 else { return }
+        DriveLog.shared.addDrive(start: s.start, end: s.end, km: s.km, from: segFrom, to: lastPlace)
+        segFrom = nil
         SharedLog.shared.log(String(format: "GPS: segment %.1f km, +%.0f/-%.0f m", s.km, s.gainM, s.lossM), category: "gps")
         var queue = Self.loadQueue()
         queue.append(s)

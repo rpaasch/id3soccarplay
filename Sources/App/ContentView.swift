@@ -44,6 +44,8 @@ struct ContentView: View {
                 .tabItem { Label("Ture", systemImage: "road.lanes") }
             NavigationStack { chargingTab.navigationTitle("Ladning") }
                 .tabItem { Label("Ladning", systemImage: "bolt.car.fill") }
+            NavigationStack { DriveLogView().navigationTitle("Kørebog") }
+                .tabItem { Label("Kørebog", systemImage: "book.closed.fill") }
             NavigationStack { moreTab.navigationTitle("Mere") }
                 .tabItem { Label("Mere", systemImage: "gearshape") }
         }
@@ -140,10 +142,9 @@ struct ContentView: View {
 
     @ViewBuilder private func chips(for s: VehicleState) -> some View {
         let warm = s.model?.batteryWarm == true
-        ViewThatFits {
-            HStack { chipList(s, warm: warm) }
-            VStack(alignment: .leading) { chipList(s, warm: warm) }
-        }
+        // A flow layout: ViewThatFits inside the wide grid measured the row but drew the column,
+        // so the chips spilled out of the card on the foldable's inner display.
+        FlowLayout(spacing: 8) { chipList(s, warm: warm) }
     }
 
     @ViewBuilder private func chipList(_ s: VehicleState, warm: Bool) -> some View {
