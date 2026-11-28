@@ -159,7 +159,7 @@ private struct LinkBadge: View {
             Image(systemName: link.symbol)
             if showText { Text(link.short) }
         }
-        .font(.caption2.weight(.semibold))
+        .font(.fig(.caption2, .semibold))
         .foregroundStyle(link.color)
     }
 }
@@ -171,11 +171,11 @@ private struct SocBlock: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline, spacing: 1) {
-                Text("\(percent(state))").font(.system(size: size, weight: .bold, design: .rounded)).monospacedDigit()
-                Text("%").font(.system(size: size * 0.42, weight: .semibold, design: .rounded)).foregroundStyle(.secondary)
+                Text("\(percent(state))").font(.fig(size: size, weight: .bold)).monospacedDigit()
+                Text("%").font(.fig(size: size * 0.42, weight: .semibold)).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 if state.isCharging {
-                    Image(systemName: "bolt.fill").font(.system(size: size * 0.42, weight: .semibold)).foregroundStyle(.yellow)
+                    Image(systemName: "bolt.fill").font(.fig(size: size * 0.42, weight: .semibold)).foregroundStyle(.yellow)
                 }
             }
             .lineLimit(1)
@@ -228,7 +228,7 @@ private struct Row: View {
             Image(systemName: symbol).frame(width: 16).foregroundStyle(tint)
             Text(text).lineLimit(1).minimumScaleFactor(0.8)
         }
-        .font(.caption)
+        .font(.fig(.caption))
     }
 }
 
@@ -256,11 +256,11 @@ struct BatteryWidgetView: View {
             case .accessoryRectangular:
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 4) {
-                        Label("ID.3 \(percent(s)) %", systemImage: s.isCharging ? "bolt.fill" : "car.fill").font(.headline)
+                        Label("ID.3 \(percent(s)) %", systemImage: s.isCharging ? "bolt.fill" : "car.fill").font(.fig(.headline))
                         if link != .ok { Image(systemName: link.symbol) }
                     }
-                    Text(s.rangeKm.map { "\(Int($0.rounded())) km · \(statusText(s))" } ?? statusText(s)).font(.caption)
-                    ageText(s.measuredAt).font(.caption2).foregroundStyle(.secondary)
+                    Text(s.rangeKm.map { "\(Int($0.rounded())) km · \(statusText(s))" } ?? statusText(s)).font(.fig(.caption))
+                    ageText(s.measuredAt).font(.fig(.caption2)).foregroundStyle(.secondary)
                 }
             case .accessoryInline:
                 Text("ID.3 \(percent(s)) %" + (s.rangeKm.map { " · \(Int($0.rounded())) km" } ?? "") + (link == .ok ? "" : " · \(link.short)"))
@@ -272,21 +272,21 @@ struct BatteryWidgetView: View {
                         SocBlock(state: s)
                         Spacer(minLength: 8)
                         Text(primaryLine(s))
-                            .font(.system(.subheadline, design: .rounded).weight(.semibold)).monospacedDigit()
+                            .font(.fig(.subheadline, .semibold)).monospacedDigit()
                             .foregroundStyle(s.isCharging ? .yellow : .primary)
                             .lineLimit(1).minimumScaleFactor(0.8)
-                        secondaryLine(s).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                        secondaryLine(s).font(.fig(.caption2)).foregroundStyle(.secondary).lineLimit(1)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Maps regner med").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                        Text("Maps regner med").font(.fig(.caption2, .semibold)).foregroundStyle(.secondary)
                         if let m = s.model {
                             mediumRow("by", binValue(m, 2))
                             mediumRow("landevej", binValue(m, 4))
                             mediumRow("motorvej", binValue(m, 6))
                             if let t = m.temperatureC {
                                 Text("\(num(t, 0)) °C · \(m.batteryWarm == true ? "varmt" : "koldt") batteri")
-                                    .font(.caption2).foregroundStyle(.secondary)
+                                    .font(.fig(.caption2)).foregroundStyle(.secondary)
                             }
                         }
                     }
@@ -302,16 +302,16 @@ struct BatteryWidgetView: View {
                     SocBlock(state: s)
                     Spacer(minLength: 8)
                     Text(primaryLine(s))
-                        .font(.system(.subheadline, design: .rounded).weight(.semibold)).monospacedDigit()
+                        .font(.fig(.subheadline, .semibold)).monospacedDigit()
                         .foregroundStyle(s.isCharging ? .yellow : .primary)
                         .lineLimit(1).minimumScaleFactor(0.8)
-                    secondaryLine(s).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    secondaryLine(s).font(.fig(.caption2)).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
         } else {
             VStack(spacing: 4) {
                 Image(systemName: "car.fill")
-                Text("Åbn appen og indsæt tokenet").font(.caption2).multilineTextAlignment(.center)
+                Text("Åbn appen og indsæt tokenet").font(.fig(.caption2)).multilineTextAlignment(.center)
             }
         }
     }
@@ -319,11 +319,11 @@ struct BatteryWidgetView: View {
     /// "ID.3" and a small connection dot (green / orange / red).
     private func header(_ link: Conn) -> some View {
         HStack(spacing: 5) {
-            Text("ID.3").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Text("ID.3").font(.fig(.caption, .semibold)).foregroundStyle(.secondary)
             Spacer(minLength: 0)
             // Spelled out whenever the numbers can't be trusted (also in CarPlay).
             if link != .ok {
-                Text(link.short).font(.caption2.weight(.semibold)).foregroundStyle(link.color).lineLimit(1)
+                Text(link.short).font(.fig(.caption2, .semibold)).foregroundStyle(link.color).lineLimit(1)
             }
             Circle().fill(link.color).frame(width: 7, height: 7)
         }
@@ -331,10 +331,10 @@ struct BatteryWidgetView: View {
 
     private func mediumRow(_ label: String, _ value: Double?) -> some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(label).font(.fig(.caption)).foregroundStyle(.secondary)
             Spacer(minLength: 4)
-            Text(value.map { num($0, 0) } ?? "–").font(.system(.callout, design: .rounded).bold()).monospacedDigit()
-            Text("kWh").font(.caption2).foregroundStyle(.secondary)
+            Text(value.map { num($0, 0) } ?? "–").font(.fig(.callout, .bold)).monospacedDigit()
+            Text("kWh").font(.fig(.caption2)).foregroundStyle(.secondary)
         }
     }
 
@@ -345,12 +345,12 @@ struct BatteryWidgetView: View {
                 SocBlock(state: s, size: 52).frame(width: 150)
                 VStack(alignment: .leading, spacing: 3) {
                     if let r = s.rangeKm {
-                        Text("\(Int(r.rounded())) km").font(.system(.title2, design: .rounded).bold()).monospacedDigit()
-                        Text("rækkevidde ifølge bilen").font(.caption2).foregroundStyle(.secondary)
+                        Text("\(Int(r.rounded())) km").font(.fig(.title2, .bold)).monospacedDigit()
+                        Text("rækkevidde ifølge bilen").font(.fig(.caption2)).foregroundStyle(.secondary)
                     }
-                    Text(statusText(s)).font(.callout.weight(.semibold)).foregroundStyle(s.isCharging ? .yellow : .primary)
+                    Text(statusText(s)).font(.fig(.callout, .semibold)).foregroundStyle(s.isCharging ? .yellow : .primary)
                     if s.socEstimated == true {
-                        Text("procent fremskrevet under kørsel").font(.caption2).foregroundStyle(.secondary)
+                        Text("procent fremskrevet under kørsel").font(.fig(.caption2)).foregroundStyle(.secondary)
                     }
                 }
                 Spacer(minLength: 0)
@@ -358,7 +358,7 @@ struct BatteryWidgetView: View {
 
             if let m = s.model {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Maps regner med (kWh/100 km)").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                    Text("Maps regner med (kWh/100 km)").font(.fig(.caption2, .semibold)).foregroundStyle(.secondary)
                     HStack(spacing: 0) {
                         speedTile("by 50", binValue(m, 2))
                         speedTile("landevej 90", binValue(m, 4))
@@ -386,9 +386,9 @@ struct BatteryWidgetView: View {
                 LinkBadge(link: link)
                 Spacer(minLength: 4)
                 switch link {
-                case .ok, .aging, .stale: (Text("bil målt ") + ageText(s.measuredAt)).font(.caption2).foregroundStyle(.secondary)
-                case .offline: (Text("sidst kendte, hentet ") + ageText(s.contactAt ?? s.measuredAt)).font(.caption2).foregroundStyle(.secondary)
-                case .vwError: Text("viser sidste måling").font(.caption2).foregroundStyle(.secondary)
+                case .ok, .aging, .stale: (Text("bil målt ") + ageText(s.measuredAt)).font(.fig(.caption2)).foregroundStyle(.secondary)
+                case .offline: (Text("sidst kendte, hentet ") + ageText(s.contactAt ?? s.measuredAt)).font(.fig(.caption2)).foregroundStyle(.secondary)
+                case .vwError: Text("viser sidste måling").font(.fig(.caption2)).foregroundStyle(.secondary)
                 }
             }
         }
@@ -396,8 +396,8 @@ struct BatteryWidgetView: View {
 
     private func speedTile(_ label: String, _ value: Double?) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(value.map { num($0, 0) } ?? "–").font(.system(.title3, design: .rounded).bold()).monospacedDigit()
-            Text(label).font(.caption2).foregroundStyle(.secondary)
+            Text(value.map { num($0, 0) } ?? "–").font(.fig(.title3, .bold)).monospacedDigit()
+            Text(label).font(.fig(.caption2)).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

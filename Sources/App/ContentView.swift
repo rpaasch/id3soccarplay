@@ -108,8 +108,8 @@ struct ContentView: View {
                         BatteryRing(soc: s.stateOfCharge, charging: s.isCharging)
                         VStack(alignment: .leading, spacing: 4) {
                             if let r = s.rangeKm {
-                                Text("\(Int(r.rounded())) km").font(.system(.title, design: .rounded).bold()).monospacedDigit()
-                                Text("rækkevidde ifølge bilen").font(.caption).foregroundStyle(.secondary)
+                                Text("\(Int(r.rounded())) km").font(.fig(.title, .bold)).monospacedDigit()
+                                Text("rækkevidde ifølge bilen").font(.fig(.caption)).foregroundStyle(.secondary)
                             }
                             let f = Freshness.of(s)
                             Label {
@@ -118,7 +118,7 @@ struct ContentView: View {
                                 Image(systemName: f.level == .fresh ? "clock" : "exclamationmark.triangle.fill")
                                     .foregroundStyle(freshColor(f.level))
                             }
-                            .font(.caption).padding(.top, 6)
+                            .font(.fig(.caption)).padding(.top, 6)
                             .fixedSize(horizontal: false, vertical: true)
                         }
                         Spacer(minLength: 0)
@@ -136,7 +136,7 @@ struct ContentView: View {
             } else {
                 Card { Text(liveNote).foregroundStyle(.secondary) }
             }
-            Text(liveNote).font(.footnote).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+            Text(liveNote).font(.fig(.footnote)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -187,7 +187,7 @@ struct ContentView: View {
                         PointMark(x: .value("Batteri", s.stateOfCharge * 100), y: .value("kW", now / 1000))
                             .foregroundStyle(.yellow)
                             .symbolSize(120)
-                            .annotation(position: .top) { Text("nu").font(.caption2.bold()) }
+                            .annotation(position: .top) { Text("nu").font(.fig(.caption2, .bold)) }
                     }
                 }
                 .chartXScale(domain: 0...100)
@@ -195,7 +195,7 @@ struct ContentView: View {
                 .chartYAxisLabel("kW")
                 .frame(height: 200)
                 Text("Grøn = denne ladning (målt). Stiplet grå = det Maps regner med.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.fig(.caption)).foregroundStyle(.secondary)
             }
         }
     }
@@ -216,7 +216,7 @@ struct ContentView: View {
             let aux = m.auxPowerW ?? 500
             if let bins = m.consumptionBinsKwhPer100, bins.count == 10 {
                 Text("Strømforbrug pr. 100 km" + (m.temperatureC.map { " ved \(DK.num($0, 0)) °C ude" } ?? "") + ", varme medregnet:")
-                    .font(.callout).foregroundStyle(.secondary)
+                    .font(.fig(.callout)).foregroundStyle(.secondary)
                 HStack(spacing: 0) {
                     tile(DK.num(SpeedBinsChart.value(bins: bins, auxW: aux, index: 2), 0) + " kWh", "by, 50 km/t")
                     tile(DK.num(SpeedBinsChart.value(bins: bins, auxW: aux, index: 4), 0) + " kWh", "landevej, 90")
@@ -226,15 +226,15 @@ struct ContentView: View {
             } else if let k = m.consumptionKwhPer100 {
                 tile(DK.num(k) + " kWh", "pr. 100 km i snit")
             }
-            Text(mapsFootnote(m)).font(.caption).foregroundStyle(.secondary)
+            Text(mapsFootnote(m)).font(.fig(.caption)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private func tile(_ value: String, _ label: String) -> some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(value).font(.system(.title2, design: .rounded).bold()).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
-            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.fig(.title2, .bold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
+            Text(label).font(.fig(.caption)).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
@@ -265,15 +265,15 @@ struct ContentView: View {
                         let pct = Int(((c.factor - 1) * 100).rounded())
                         HStack(alignment: .center) {
                             Text("×" + DK.num(c.factor, 2))
-                                .font(.system(size: 34, weight: .bold, design: .rounded)).monospacedDigit()
+                                .font(.fig(size: 34, weight: .bold)).monospacedDigit()
                             Spacer()
                             Text("\(c.n) \(c.n == 1 ? "tur" : "ture") · \(DK.num(c.km, 0)) km")
-                                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                                .font(.fig(.caption, .semibold)).foregroundStyle(.secondary)
                                 .padding(.horizontal, 10).padding(.vertical, 5)
                                 .background(Color(.tertiarySystemFill), in: Capsule())
                         }
                         Text("Bilen bruger \(abs(pct)) % \(pct >= 0 ? "mere" : "mindre") strøm end ren fysik siger. Maps får forbruget ganget med dette tal. Det bygger på \(c.sourceText).")
-                            .font(.callout).foregroundStyle(.secondary)
+                            .font(.fig(.callout)).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -284,11 +284,11 @@ struct ContentView: View {
                 let shown = Array(trips.prefix(20))
                 let scale = (shown.flatMap { [$0.kwhPer100, $0.mapsValue] }.max() ?? 30) * 1.05
                 ForEach(groupedByDay(shown)) { group in
-                    Text(group.day).font(.title3.bold()).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
+                    Text(group.day).font(.fig(.title3, .bold)).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
                     ForEach(group.trips) { TripCard(trip: $0, scale: scale) }
                 }
                 Text("Brugte = kWh pr. 100 km ud fra batteriets fald. Maps = det forbrug, Maps fik for samme fart og temperatur, med den kalibrering der gjaldt da. Ture under 20 km tæller ikke med, fordi batteriet melder i hele procent.")
-                    .font(.footnote).foregroundStyle(.secondary)
+                    .font(.fig(.footnote)).foregroundStyle(.secondary)
             }
         }
     }
@@ -297,7 +297,7 @@ struct ContentView: View {
     private var bandsCard: some View {
         Card(title: "Temperaturbånd", symbol: "thermometer.snowflake") {
             Text("Bilen bruger forskelligt efter temperaturen. Hvert bånd husker sine egne seneste 15 ture, så vinteren stadig er kendt til foråret. Maps bruger båndet for dagens temperatur.")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.fig(.caption)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             VStack(spacing: 2) {
                 ForEach(bands) { b in bandRow(b) }
@@ -307,7 +307,7 @@ struct ContentView: View {
                 Label("varmt batteri", systemImage: "bolt.fill").foregroundStyle(.orange)
                 Label("koldt", systemImage: "bolt.fill").foregroundStyle(.cyan)
             }
-            .font(.caption2)
+            .font(.fig(.caption2))
         }
     }
 
@@ -315,22 +315,22 @@ struct ContentView: View {
         HStack(alignment: .center, spacing: 8) {
             VStack(alignment: .leading, spacing: 1) {
                 Text("\(b.band) til \(b.band + 5) °C")
-                    .font(.callout.weight(b.current ? .semibold : .regular)).monospacedDigit()
-                if b.current { Text("i dag").font(.caption2.bold()).foregroundStyle(.teal) }
+                    .font(.fig(.callout, b.current ? .semibold : .regular)).monospacedDigit()
+                if b.current { Text("i dag").font(.fig(.caption2, .bold)).foregroundStyle(.teal) }
             }
             .fixedSize()
             Spacer(minLength: 8)
             if let f = b.factor {
-                Text("×" + DK.num(f, 2)).font(.callout.bold()).monospacedDigit().fixedSize()
-                Text("\(DK.num(b.km, 0)) km").font(.caption).foregroundStyle(.secondary).monospacedDigit().fixedSize()
+                Text("×" + DK.num(f, 2)).font(.fig(.callout, .bold)).monospacedDigit().fixedSize()
+                Text("\(DK.num(b.km, 0)) km").font(.fig(.caption)).foregroundStyle(.secondary).monospacedDigit().fixedSize()
             } else {
-                Text(b.km > 0 ? "\(DK.num(b.km, 0)) km – for lidt" : "ingen ture").font(.caption).foregroundStyle(.tertiary).fixedSize()
+                Text(b.km > 0 ? "\(DK.num(b.km, 0)) km – for lidt" : "ingen ture").font(.fig(.caption)).foregroundStyle(.tertiary).fixedSize()
             }
             HStack(spacing: 2) {
                 Image(systemName: "bolt.fill").foregroundStyle(b.chargeWarm > 0 ? Color.orange : Color.clear)
                 Image(systemName: "bolt.fill").foregroundStyle(b.chargeCold > 0 ? Color.cyan : Color.clear)
             }
-            .font(.caption)
+            .font(.fig(.caption))
         }
         .padding(.vertical, 8).padding(.horizontal, 10)
         .background(b.current ? Color.teal.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -355,7 +355,7 @@ struct ContentView: View {
                 let points = curvePoints(profile: p, hints: m)
                 Card(title: "Sådan regner Maps med, at bilen lader", symbol: "chart.xyaxis.line") {
                     Text("Kurven viser, hvor mange kW bilen tager imod ved hver batteriprocent på en hurtiglader. Maps bruger den til at regne ladetid og ladestop ud.")
-                        .font(.callout).foregroundStyle(.secondary)
+                        .font(.fig(.callout)).foregroundStyle(.secondary)
                     if points.isEmpty {
                         Text("Ingen kurve.").foregroundStyle(.secondary)
                     } else {
@@ -381,7 +381,7 @@ struct ContentView: View {
                             legend(.green, "målt ved dine ladninger")
                             legend(.gray, "standardkurve")
                         }
-                        .font(.caption)
+                        .font(.fig(.caption))
 
                         let capacityKwh = p.adjusted(with: m).profile.battery.usableCapacityWh / 1000
                         HStack(spacing: 12) {
@@ -392,7 +392,7 @@ struct ContentView: View {
                         }
                         .padding(.top, 4)
                         Text(chargeConditions(m))
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(.fig(.caption)).foregroundStyle(.secondary)
                     }
                 }
                 if let m {
@@ -401,14 +401,14 @@ struct ContentView: View {
                         let learned = curve.compactMap { $0 }.count
                         if learned > 0 {
                             Text("\(learned) af \(max(curve.count, 11)) punkter på kurven er målt ved dine egne hurtigladninger med \(m.chargeCurveWarm == true ? "varmt" : "koldt") batteri (\(m.chargeSessions ?? 0) \((m.chargeSessions ?? 0) == 1 ? "ladning" : "ladninger") i alt). Resten er standardkurven.")
-                                .font(.callout)
+                                .font(.fig(.callout))
                             if let gaps = missingRanges(curve) {
                                 Text("Mangler stadig: \(gaps). De punkter lærer appen, næste gang du lader i det område.")
-                                    .font(.caption).foregroundStyle(.secondary)
+                                    .font(.fig(.caption)).foregroundStyle(.secondary)
                             }
                         } else {
                             Text("Der er endnu ingen målinger ved den temperatur. Maps bruger standardkurven, indtil du har hurtigladet.")
-                                .font(.callout)
+                                .font(.fig(.callout))
                         }
                         if let all = m.chargeCurves, !all.isEmpty {
                             LearnedCurvesView(curves: all, active: m.chargeCurveActive)
@@ -418,7 +418,7 @@ struct ContentView: View {
                             KeyValue(key: "Brugbart batteri", value: "\(Int(c)) kWh")
                         }
                         Text("Appen lærer automatisk, hver gang bilen hurtiglader. Varmt batteri (lige efter kørsel) og koldt batteri læres hver for sig, fordi et koldt batteri lader langsommere.")
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(.fig(.caption)).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -463,8 +463,8 @@ struct ContentView: View {
 
     private func stat(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(value).font(.title2.bold()).monospacedDigit()
-            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.fig(.title2, .bold)).monospacedDigit()
+            Text(label).font(.fig(.caption)).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
@@ -515,7 +515,7 @@ struct ContentView: View {
                 if obd.power.count >= 2 { PowerChart(points: obd.power).padding(.vertical, 4) }
                 if let v = obd.volt12 { row("12 V-batteri", v) }
                 if let t = obd.lastAnswer { row("Sidste svar", t.formatted(date: .omitted, time: .standard)) }
-                if let c = obd.calibration { Text("Kalibrering: \(c)").font(.caption).foregroundStyle(.secondary) }
+                if let c = obd.calibration { Text("Kalibrering: \(c)").font(.fig(.caption)).foregroundStyle(.secondary) }
                 Button("Opdater") { obd = OBDManager.shared.status() }
             }
         } header: {
@@ -535,10 +535,10 @@ struct ContentView: View {
             if gpsOn {
                 row("Tilladelse", GPSRecorder.shared.authorizationText)
                 row("Optager nu", GPSRecorder.shared.isRecording ? "ja" : "nej")
-                if !gpsNote.isEmpty { Text(gpsNote).font(.footnote).foregroundStyle(.secondary) }
+                if !gpsNote.isEmpty { Text(gpsNote).font(.fig(.footnote)).foregroundStyle(.secondary) }
             }
             Text("Positioner bliver på telefonen. Kun tid og km pr. fartinterval samt meter op og ned sendes til Workeren. Vælg \"Altid\" som placeringstilladelse, så turen måles uden at appen er åben.")
-                .font(.footnote).foregroundStyle(.secondary)
+                .font(.fig(.footnote)).foregroundStyle(.secondary)
         }
     }
 
@@ -744,7 +744,7 @@ private struct LearnedCurvesView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Alle dine hurtigladninger")
-                .font(.subheadline.weight(.semibold))
+                .font(.fig(.subheadline, .semibold))
             Chart {
                 ForEach(Array(curves.enumerated()), id: \.element) { i, c in
                     let isActive = c.key == active
@@ -776,9 +776,9 @@ private struct LearnedCurvesView: View {
                     Circle().fill(color(i)).frame(width: 8, height: 8)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(c.label + (isActive ? " · bruges nu" : ""))
-                            .font(.callout.weight(isActive ? .semibold : .regular))
+                            .font(.fig(.callout, isActive ? .semibold : .regular))
                         Text(detail(c))
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(.fig(.caption)).foregroundStyle(.secondary)
                     }
                 }
                 .accessibilityElement(children: .combine)
@@ -786,7 +786,7 @@ private struct LearnedCurvesView: View {
             Text(active == nil
                  ? "Ingen af kurverne passer til vejret lige nu, så Maps bruger standardkurven."
                  : "Maps får den fede kurve: den, der passer til temperaturen og batteriet lige nu. Mangler den, låner appen fra den nærmeste temperatur.")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.fig(.caption)).foregroundStyle(.secondary)
         }
     }
 

@@ -83,7 +83,7 @@ struct DriveLogView: View {
                     } label: {
                         Label("Eksportér kørselsregnskab for måneden", systemImage: "square.and.arrow.up")
                     }
-                    .font(.footnote)
+                    .font(.fig(.footnote))
                 }
             }
             settingsSection
@@ -119,8 +119,8 @@ struct DriveLogView: View {
 
     private func total(_ label: String, km: Double) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("\(DK.num(km, 0)) km").font(.title2.bold()).monospacedDigit()
-            Text("\(DK.num(km * log.rate, 0)) kr. · tjenstligt \(label)").font(.caption).foregroundStyle(.secondary)
+            Text("\(DK.num(km, 0)) km").font(.fig(.title2, .bold)).monospacedDigit()
+            Text("\(DK.num(km * log.rate, 0)) kr. · tjenstligt \(label)").font(.fig(.caption)).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -133,18 +133,18 @@ struct DriveLogView: View {
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 3) {
                 Text("\(e.start.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).locale(DK.locale))) · \(DK.time(e.start))–\(DK.time(e.end))")
-                    .font(.subheadline.weight(.semibold))
+                    .font(.fig(.subheadline, .semibold))
                 Text("\(e.fromText.isEmpty ? "ukendt start" : e.fromText) → \(e.toText.isEmpty ? "ukendt mål" : e.toText)")
-                    .font(.callout).foregroundStyle(.secondary)
+                    .font(.fig(.callout)).foregroundStyle(.secondary)
                     .lineLimit(2)
                 if e.business {
                     Text(e.purpose.isEmpty ? "Formål mangler" : e.purpose)
-                        .font(.caption)
+                        .font(.fig(.caption))
                         .foregroundStyle(e.purpose.isEmpty ? Color.orange : Color.primary)
                 }
             }
             Spacer(minLength: 8)
-            Text("\(DK.num(e.km, 1)) km").font(.callout.weight(.semibold)).monospacedDigit()
+            Text("\(DK.num(e.km, 1)) km").font(.fig(.callout, .semibold)).monospacedDigit()
         }
         .accessibilityElement(children: .combine)
         .accessibilityHint("Tryk for at redigere")
@@ -164,7 +164,7 @@ struct DriveLogView: View {
             ForEach(log.places) { p in
                 VStack(alignment: .leading) {
                     Text(p.name)
-                    if !p.address.isEmpty { Text(p.address).font(.caption).foregroundStyle(.secondary) }
+                    if !p.address.isEmpty { Text(p.address).font(.fig(.caption)).foregroundStyle(.secondary) }
                 }
                 .swipeActions { Button(role: .destructive) { log.deletePlace(p.id) } label: { Label("Slet", systemImage: "trash") } }
             }
@@ -209,7 +209,7 @@ private struct DriveEditor: View {
                             FlowLayout(spacing: 6) {
                                 ForEach(recent, id: \.self) { p in
                                     Button(p) { entry.purpose = p }
-                                        .font(.caption).buttonStyle(.bordered).buttonBorderShape(.capsule)
+                                        .font(.fig(.caption)).buttonStyle(.bordered).buttonBorderShape(.capsule)
                                 }
                             }
                         }
@@ -217,9 +217,9 @@ private struct DriveEditor: View {
                 }
                 Section("Rute") {
                     LabeledContent("Fra") { TextField("Startadresse", text: $entry.fromText).multilineTextAlignment(.trailing) }
-                    if entry.from != nil { Button("Gem start som sted…") { placeName = ""; naming = true }.font(.caption) }
+                    if entry.from != nil { Button("Gem start som sted…") { placeName = ""; naming = true }.font(.fig(.caption)) }
                     LabeledContent("Til") { TextField("Mål", text: $entry.toText).multilineTextAlignment(.trailing) }
-                    if entry.to != nil { Button("Gem mål som sted…") { placeName = ""; naming = false }.font(.caption) }
+                    if entry.to != nil { Button("Gem mål som sted…") { placeName = ""; naming = false }.font(.fig(.caption)) }
                     LabeledContent("Km") {
                         TextField("km", value: $entry.km, format: .number.precision(.fractionLength(1)).locale(DK.locale))
                             .keyboardType(.decimalPad).multilineTextAlignment(.trailing)

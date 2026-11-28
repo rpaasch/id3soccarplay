@@ -159,18 +159,18 @@ struct AnalysisPanel: View {
                 if analyst.running { ProgressView().padding(.leading, 6) }
             }
             if let p = analyst.problem {
-                Text(p).font(.callout).foregroundStyle(.orange)
+                Text(p).font(.fig(.callout)).foregroundStyle(.orange)
             }
             if let r = analyst.result {
                 AnalysisResultView(result: r)
             } else if !analyst.text.isEmpty {
                 Text((try? AttributedString(markdown: analyst.text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(analyst.text))
-                    .font(.subheadline)
+                    .font(.fig(.subheadline))
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Text("Analysen laves af Apple Intelligence direkte på telefonen. Dine data forlader ikke telefonen. AI kan tage fejl, så tjek tallene i grafen.")
-                .font(.caption2).foregroundStyle(.secondary)
+                .font(.fig(.caption2)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -199,19 +199,19 @@ struct AnalysisResultView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(result.headline)
-                .font(.headline)
+                .font(.fig(.headline))
                 .fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 12) {
                 ForEach(result.points) { p in
                     HStack(alignment: .top, spacing: 12) {
                         Image(systemName: p.symbol)
-                            .font(.subheadline.weight(.semibold))
+                            .font(.fig(.subheadline, .semibold))
                             .foregroundStyle(color(p.tint))
                             .frame(width: 32, height: 32)
                             .background(color(p.tint).opacity(0.15), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(p.title).font(.subheadline.weight(.semibold))
-                            Text(p.detail).font(.subheadline).foregroundStyle(.secondary)
+                            Text(p.title).font(.fig(.subheadline, .semibold))
+                            Text(p.detail).font(.fig(.subheadline)).foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -220,7 +220,7 @@ struct AnalysisResultView: View {
             }
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "checkmark.seal.fill").foregroundStyle(.teal)
-                Text(result.conclusion).font(.subheadline)
+                Text(result.conclusion).font(.fig(.subheadline))
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(12)

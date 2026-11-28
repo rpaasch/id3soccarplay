@@ -20,7 +20,7 @@ struct Card<Content: View>: View {
         VStack(alignment: .leading, spacing: 10) {
             if let title {
                 Label(title, systemImage: symbol ?? "circle")
-                    .font(.subheadline.weight(.semibold))
+                    .font(.fig(.subheadline, .semibold))
                     .foregroundStyle(.secondary)
             }
             content
@@ -41,7 +41,7 @@ struct KeyValue: View {
             Spacer(minLength: 12)
             Text(value).multilineTextAlignment(.trailing).monospacedDigit()
         }
-        .font(.callout)
+        .font(.fig(.callout))
         .accessibilityElement(children: .combine)
     }
 }
@@ -64,11 +64,11 @@ struct BatteryRing: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 2) {
                 Text("\(Int((soc * 100).rounded()))")
-                    .font(.system(size: 60, weight: .bold, design: .rounded))
+                    .font(.fig(size: 60, weight: .bold))
                     .monospacedDigit()
-                Text("%").font(.system(size: 26, weight: .semibold, design: .rounded)).foregroundStyle(.secondary)
+                Text("%").font(.fig(size: 26, weight: .semibold)).foregroundStyle(.secondary)
                 if charging {
-                    Image(systemName: "bolt.fill").font(.system(size: 24, weight: .semibold)).foregroundStyle(.yellow)
+                    Image(systemName: "bolt.fill").font(.fig(size: 24, weight: .semibold)).foregroundStyle(.yellow)
                 }
             }
             .lineLimit(1)
@@ -140,7 +140,7 @@ struct StatusChip: View {
 
     var body: some View {
         Label(text, systemImage: symbol)
-            .font(.caption.weight(.semibold))
+            .font(.fig(.caption, .semibold))
             .padding(.horizontal, 10).padding(.vertical, 6)
             .background(tint.opacity(0.15), in: Capsule())
             .foregroundStyle(tint)
@@ -197,13 +197,13 @@ struct SpeedBinsChart: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("kWh pr. 100 km ved hver fart").font(.caption2).foregroundStyle(.secondary)
+            Text("kWh pr. 100 km ved hver fart").font(.fig(.caption2)).foregroundStyle(.secondary)
             Chart(parts) { p in
                 BarMark(x: .value("km/t", p.label), y: .value("kWh/100 km", p.kwh), width: .ratio(0.6))
                     .foregroundStyle(by: .value("Del", p.kind))
                     .annotation(position: .top, spacing: 2) {
                         if p.top {
-                            Text("\(Int(p.total.rounded()))").font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                            Text("\(Int(p.total.rounded()))").font(.fig(.caption2).monospacedDigit()).foregroundStyle(.secondary)
                         }
                     }
             }
@@ -212,12 +212,12 @@ struct SpeedBinsChart: View {
             .chartLegend(position: .top, alignment: .leading, spacing: 6)
             .chartYAxis(.hidden)
             .chartXAxis {
-                AxisMarks { _ in AxisValueLabel().font(.caption2) }
+                AxisMarks { _ in AxisValueLabel().font(.fig(.caption2)) }
             }
             .frame(height: 130)
-            Text("km/t").font(.caption2).foregroundStyle(.tertiary).frame(maxWidth: .infinity, alignment: .trailing)
+            Text("km/t").font(.fig(.caption2)).foregroundStyle(.tertiary).frame(maxWidth: .infinity, alignment: .trailing)
             Text(note)
-                .font(.caption2).foregroundStyle(.secondary)
+                .font(.fig(.caption2)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityElement(children: .ignore)
@@ -284,13 +284,13 @@ struct TripCard: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(DK.time(trip.startDate))–\(DK.time(trip.endDate))")
-                        .font(.headline).monospacedDigit()
+                        .font(.fig(.headline)).monospacedDigit()
                     Text("\(trip.minutes) min" + ((trip.joined ?? 1) > 1 ? " · med kort stop" : ""))
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.fig(.caption)).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Text((trip.vsMaps >= 1 ? "+" : "−") + DK.num(abs(trip.vsMaps - 1) * 100, 0) + " %")
-                    .font(.subheadline.weight(.bold)).monospacedDigit()
+                    .font(.fig(.subheadline, .bold)).monospacedDigit()
                     .padding(.horizontal, 10).padding(.vertical, 5)
                     .background(tint.opacity(0.15), in: Capsule())
                     .foregroundStyle(tint)
@@ -303,7 +303,7 @@ struct TripCard: View {
                     HStack(spacing: 12) { conditionStats }
                 }
             }
-            .font(.caption).foregroundStyle(.secondary)
+            .font(.fig(.caption)).foregroundStyle(.secondary)
 
             VStack(spacing: 6) {
                 bar("Brugte", trip.kwhPer100, trip.isCounted ? .primary : .secondary)
@@ -315,7 +315,7 @@ struct TripCard: View {
                 if trip.cold == true { Image(systemName: "snowflake").foregroundStyle(.cyan) }
                 Text(verdict).foregroundStyle(trip.isCounted ? tint : .secondary)
             }
-            .font(.caption)
+            .font(.fig(.caption))
         }
         .opacity(trip.isCounted ? 1 : 0.75)
         .accessibilityElement(children: .combine)
@@ -343,7 +343,7 @@ struct TripCard: View {
 
     private func bar(_ label: String, _ value: Double, _ color: Color) -> some View {
         HStack(spacing: 8) {
-            Text(label).font(.caption).foregroundStyle(.secondary).frame(width: 48, alignment: .leading)
+            Text(label).font(.fig(.caption)).foregroundStyle(.secondary).frame(width: 48, alignment: .leading)
             GeometryReader { g in
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color(.tertiarySystemFill))
@@ -352,7 +352,7 @@ struct TripCard: View {
                 }
             }
             .frame(height: 8)
-            Text(DK.num(value)).font(.caption.monospacedDigit()).frame(width: 36, alignment: .trailing)
+            Text(DK.num(value)).font(.fig(.caption).monospacedDigit()).frame(width: 36, alignment: .trailing)
         }
     }
 }
@@ -367,9 +367,9 @@ struct LogView: View {
             }
             ForEach(entries.reversed()) { e in
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(e.message).font(.callout)
+                    Text(e.message).font(.fig(.callout))
                     Text("\(e.date.formatted(date: .abbreviated, time: .standard)) · \(e.source.rawValue)/\(e.category)")
-                        .font(.caption2).foregroundStyle(.secondary)
+                        .font(.fig(.caption2)).foregroundStyle(.secondary)
                 }
             }
         }

@@ -37,7 +37,7 @@ struct PowerChart: View {
             }
             .frame(height: 150)
             Text("Gennemsnit \(DK.num(avg, 1)) kW, senest \(DK.num(points.last?.kw ?? 0, 1)) kW. Målt med batteriets egen energitæller hvert 15. sekund. Skalaen læres af, hvor meget batteriprocenten falder, så den passer bedre efter hver tur.")
-                .font(.caption2).foregroundStyle(.secondary)
+                .font(.fig(.caption2)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityElement(children: .ignore)
@@ -113,7 +113,7 @@ private struct ChartFrame<Content: View>: View {
                 .overlay(alignment: .topTrailing) {
                     Button { showFull = true } label: {
                         Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            .font(.subheadline.weight(.semibold))
+                            .font(.fig(.subheadline, .semibold))
                             .padding(10)
                             .background(Color(.tertiarySystemFill), in: Circle())
                     }
@@ -168,15 +168,15 @@ private struct TripBubble: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(trip.startDate.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute().locale(DK.locale)))
-                .font(.caption.weight(.semibold))
+                .font(.fig(.caption, .semibold))
             Text("\(DK.num(trip.km, 0)) km · brugte \(DK.num(trip.kwhPer100, 1)) · Maps \(DK.num(trip.mapsValue, 1)) kWh/100 km")
-                .font(.caption2).monospacedDigit()
+                .font(.fig(.caption2)).monospacedDigit()
             HStack(spacing: 8) {
                 Text((deviation(trip) >= 0 ? "+" : "") + "\(Int(deviation(trip).rounded())) %").foregroundStyle(hitColor(trip)).bold()
                 if let c = trip.tempC { Text("\(DK.num(c, 0)) °C") }
                 if let v = trip.avgKmh { Text("\(DK.num(v, 0)) km/t") }
             }
-            .font(.caption2).monospacedDigit()
+            .font(.fig(.caption2)).monospacedDigit()
         }
         .padding(8)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -189,7 +189,7 @@ private struct SelectionLine: View {
     var body: some View {
         Group {
             if let t = trip { TripBubble(trip: t) } else {
-                Label(hint, systemImage: "hand.tap").font(.caption2).foregroundStyle(.secondary)
+                Label(hint, systemImage: "hand.tap").font(.fig(.caption2)).foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
@@ -241,7 +241,7 @@ private struct AccuracyChart: View {
             .frame(height: expanded ? 420 : 170)
             SelectionLine(trip: selectedTrip, hint: expanded ? "Knib for at zoome, rul til siden, træk for at se hver tur" : "Træk hen over søjlerne for at se hver tur")
             Text("Ældste tur til venstre. Over nul brugte bilen mere, end Maps regnede med. \(within) af \(trips.count) ture ramte inden for ±5 % (mellem de grønne streger).")
-                .font(.caption2).foregroundStyle(.secondary)
+                .font(.fig(.caption2)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -306,7 +306,7 @@ private struct OverTimeChart: View {
             .frame(height: expanded ? 420 : 190)
             SelectionLine(trip: selectedTrip, hint: "Knib for at zoome, rul til siden for ældre ture, tryk for detaljer")
             Text("kWh pr. 100 km. Jo tættere de to linjer ligger, jo bedre passer Maps' rækkevidde og ankomstprocent.")
-                .font(.caption2).foregroundStyle(.secondary)
+                .font(.fig(.caption2)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -390,9 +390,9 @@ private struct ScatterChart: View {
                     HStack(spacing: 4) { Circle().fill(l.1).frame(width: 8, height: 8); Text(l.0) }
                 }
             }
-            .font(.caption2).foregroundStyle(.secondary)
+            .font(.fig(.caption2)).foregroundStyle(.secondary)
             SelectionLine(trip: selectedTrip, hint: expanded ? "Knib for at zoome, træk for at se hver tur" : "Træk hen over grafen for at se hver tur")
-            Text(kind.note).font(.caption2).foregroundStyle(.secondary)
+            Text(kind.note).font(.fig(.caption2)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
