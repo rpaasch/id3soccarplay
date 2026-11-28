@@ -141,38 +141,63 @@ struct AnalysisPanel: View {
     @State private var analyst = ChartAnalyst()
     @State private var ownQuestion = ""
 
+    private static let privacy = "Analysen laves af Apple Intelligence direkte på telefonen. Dine data forlader ikke telefonen. AI kan tage fejl, så tjek tallene i grafen."
+
     var body: some View {
-        Card(title: "AI-analyse", symbol: "sparkles") {
-            if allowsOwnQuestion {
-                TextField("Spørg om dine ture, fx \"Hvorfor brugte jeg mere i tirsdags?\"", text: $ownQuestion, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .submitLabel(.send)
-                    .onSubmit { run() }
-            }
-            HStack {
-                Button { run() } label: {
-                    Label(analyst.text.isEmpty ? "Analysér" : "Analysér igen", systemImage: "sparkles")
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(analyst.running)
-                if analyst.running { ProgressView().padding(.leading, 6) }
-            }
+        Card(title: "AI-analyse", symbol: "sparkles", info: Self.privacy) {
+            if allowsOwnQuestion { askField } else { analyzeButton }
             if let p = analyst.problem {
-                Text(p).font(.fig(.callout)).foregroundStyle(.orange)
+                Label(p, systemImage: "exclamationmark.triangle").font(.fig(.footnote)).foregroundStyle(.orange)
+            }
+            if analyst.running && analyst.result == nil {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text("Analyserer dine ture…").font(.fig(.footnote)).foregroundStyle(.secondary)
+                }
             }
             if let r = analyst.result {
-                AnalysisResultView(result: r)
-            } else if !analyst.text.isEmpty {
-                Text((try? AttributedString(markdown: analyst.text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(analyst.text))
-                    .font(.fig(.subheadline))
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+                AnalysisResultView(result: r).padding(.top, 4)
             }
-            Text("Analysen laves af Apple Intelligence direkte på telefonen. Dine data forlader ikke telefonen. AI kan tage fejl, så tjek tallene i grafen.")
-                .font(.fig(.caption2)).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    /// One rounded field like a message box: type a question, or just tap ✦ for an overview.
+    private var askField: some View {
+        let empty = ownQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return HStack(alignment: .bottom, spacing: 8) {
+            TextField("Spørg om dine ture …", text: $ownQuestion, axis: .vertical)
+                .font(.fig(.body))
+                .lineLimit(1...4)
+                .submitLabel(.send)
+                .onSubmit { run() }
+                .padding(.vertical, 9)
+                .padding(.leading, 16)
+            Button { run() } label: {
+                Image(systemName: empty ? "sparkles" : "arrow.up")
+                    .font(.fig(.body, .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(Color.teal, in: Circle())
+                    .contentTransition(.symbolEffect(.replace))
+            }
+            .buttonStyle(.plain)
+            .disabled(analyst.running)
+            .opacity(analyst.running ? 0.4 : 1)
+            .padding(4)
+            .accessibilityLabel(empty ? "Analysér mine ture" : "Send spørgsmål")
+        }
+        .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 21, style: .continuous))
+    }
+
+    private var analyzeButton: some View {
+        Button { run() } label: {
+            Label(analyst.result == nil ? "Analysér grafen" : "Analysér igen", systemImage: "sparkles")
+                .font(.fig(.subheadline, .semibold))
+        }
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.capsule)
+        .tint(.teal)
+        .disabled(analyst.running)
     }
 
     private func run() {

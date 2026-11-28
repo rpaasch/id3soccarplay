@@ -44,7 +44,7 @@ struct DriveLogView: View {
             }
             if months.isEmpty {
                 Section {
-                    Text("Ingen ture endnu. Hver tur, GPS'en måler, kommer automatisk her med tider, km og adresser. Du kan også tilføje en tur selv med +.")
+                    Text("Ingen ture endnu. De kommer automatisk, eller tilføj selv med +.")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -171,7 +171,7 @@ struct DriveLogView: View {
         } header: {
             Text("Indstillinger og steder")
         } footer: {
-            Text("Tjek satsen hvert år hos din arbejdsgiver eller Skat. Steder gemmer du fra en tur (fx \"Arbejde\"); ture, der starter eller slutter inden for 200 m, får stedets navn. Positionerne bliver på telefonen og sendes aldrig til Workeren. Adresser slås op hos Apple.")
+            Text("Tjek satsen hvert år. Gem steder (fx \"Arbejde\") fra en tur.")
         }
     }
 

@@ -11,6 +11,7 @@ import Charts
 
 /// Battery output over the current drive, from the dongle's energy counter.
 struct PowerChart: View {
+    static let info = "Batteriets effekt målt med bilens egen energitæller hvert 15. sekund: kørsel, varme og tab tilsammen. Skalaen læres af, hvor meget batteriprocenten falder, så den passer bedre efter hver tur."
     let points: [PowerPoint]
 
     var body: some View {
@@ -36,9 +37,8 @@ struct PowerChart: View {
                 }
             }
             .frame(height: 150)
-            Text("Gennemsnit \(DK.num(avg, 1)) kW, senest \(DK.num(points.last?.kw ?? 0, 1)) kW. Målt med batteriets egen energitæller hvert 15. sekund. Skalaen læres af, hvor meget batteriprocenten falder, så den passer bedre efter hver tur.")
-                .font(.fig(.caption2)).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            Text("Snit \(DK.num(avg, 1)) kW · nu \(DK.num(points.last?.kw ?? 0, 1)) kW")
+                .font(.fig(.caption)).foregroundStyle(.secondary).monospacedDigit()
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Batteriets effekt under turen, gennemsnit \(DK.num(avg, 1)) kilowatt")
@@ -99,6 +99,8 @@ private struct ChartFrame<Content: View>: View {
     let title: String
     let symbol: String
     let expanded: Bool
+    /// How to read the chart: behind ⓘ on the card, written out in full screen.
+    let info: String
     let analysisQuestion: String
     let analysisData: String
     var full: () -> AnyView
@@ -107,18 +109,25 @@ private struct ChartFrame<Content: View>: View {
 
     var body: some View {
         if expanded {
-            VStack(alignment: .leading, spacing: 12) { content }
+            VStack(alignment: .leading, spacing: 12) {
+                content
+                Text(info).font(.fig(.footnote)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         } else {
             Card(title: title, symbol: symbol) { content }
                 .overlay(alignment: .topTrailing) {
-                    Button { showFull = true } label: {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            .font(.fig(.subheadline, .semibold))
-                            .padding(10)
-                            .background(Color(.tertiarySystemFill), in: Circle())
+                    HStack(spacing: 2) {
+                        InfoButton(text: info)
+                        Button { showFull = true } label: {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.fig(.footnote, .semibold))
+                                .frame(width: 30, height: 30)
+                                .background(Color(.tertiarySystemFill), in: Circle())
+                        }
+                        .accessibilityLabel("Forstør \(title)")
                     }
                     .padding(10)
-                    .accessibilityLabel("Forstør \(title)")
                 }
                 .fullScreenCover(isPresented: $showFull) {
                     NavigationStack {
@@ -183,16 +192,15 @@ private struct TripBubble: View {
     }
 }
 
-private struct SelectionLine: View {
+/// Shows the touched trip on top of the chart, so nothing moves and no space is reserved.
+private struct SelectionBubble: ViewModifier {
     let trip: Trip?
-    let hint: String
-    var body: some View {
-        Group {
-            if let t = trip { TripBubble(trip: t) } else {
-                Label(hint, systemImage: "hand.tap").font(.fig(.caption2)).foregroundStyle(.secondary)
+    func body(content: Content) -> some View {
+        content.overlay(alignment: .topLeading) {
+            if let t = trip {
+                TripBubble(trip: t).padding(.leading, 36).allowsHitTesting(false)
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
     }
 }
 
@@ -210,6 +218,7 @@ private struct AccuracyChart: View {
         let within = trips.filter { abs(deviation($0)) <= 5 }.count
         let span = max(15, (trips.map { abs(deviation($0)) }.max() ?? 15) + 5)
         ChartFrame(title: "Ramte Maps forbruget?", symbol: "target", expanded: expanded,
+                   info: "Én søjle pr. tur, ældste til venstre. Over nul brugte bilen mere, end Maps regnede med. Mellem de grønne streger ramte Maps inden for ±5 %. Træk hen over søjlerne for at se hver tur; forstør for at zoome.",
                    analysisQuestion: "Hvor godt rammer Maps' forbrug de rigtige ture? Er der et mønster i, hvornår Maps tager fejl (temperatur, fart, turens længde, over tid)? Bliver det bedre?",
                    analysisData: tripsDigest(trips), full: { AnyView(AccuracyChart(trips: trips, expanded: true)) }) {
             Chart {
@@ -239,10 +248,8 @@ private struct AccuracyChart: View {
             .chartScrollPosition(initialX: String(max(0, trips.count - Int(visibleBars))))
             .modifier(PinchZoom(length: $visibleBars, range: 5...Double(max(6, trips.count))))
             .frame(height: expanded ? 420 : 170)
-            SelectionLine(trip: selectedTrip, hint: expanded ? "Knib for at zoome, rul til siden, træk for at se hver tur" : "Træk hen over søjlerne for at se hver tur")
-            Text("Ældste tur til venstre. Over nul brugte bilen mere, end Maps regnede med. \(within) af \(trips.count) ture ramte inden for ±5 % (mellem de grønne streger).")
-                .font(.fig(.caption2)).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            .modifier(SelectionBubble(trip: selectedTrip))
+            Text("\(within) af \(trips.count) ture inden for ±5 %").font(.fig(.caption)).foregroundStyle(.secondary)
         }
     }
 }
@@ -264,6 +271,7 @@ private struct OverTimeChart: View {
         let top = (trips.flatMap { [$0.kwhPer100, $0.mapsValue] }.max() ?? 30) * 1.15
         let spanDays = max(2, ((trips.last?.start ?? 0) - (trips.first?.start ?? 0)) / 86_400_000 + 1)
         ChartFrame(title: "Forbrug over tid", symbol: "chart.line.uptrend.xyaxis", expanded: expanded,
+                   info: "kWh pr. 100 km for hver tur. Jo tættere de to linjer ligger, jo bedre passer Maps' rækkevidde og ankomstprocent. Knib for at zoome, rul til siden for ældre ture, tryk for detaljer.",
                    analysisQuestion: "Hvordan har forbruget udviklet sig over tid, og hvor godt har Maps fulgt med? Er der dage eller ture, der skiller sig ud, og hvad kan forklare det?",
                    analysisData: tripsDigest(trips), full: { AnyView(OverTimeChart(trips: trips, expanded: true)) }) {
             Chart {
@@ -304,10 +312,7 @@ private struct OverTimeChart: View {
                 }
             }
             .frame(height: expanded ? 420 : 190)
-            SelectionLine(trip: selectedTrip, hint: "Knib for at zoome, rul til siden for ældre ture, tryk for detaljer")
-            Text("kWh pr. 100 km. Jo tættere de to linjer ligger, jo bedre passer Maps' rækkevidde og ankomstprocent.")
-                .font(.fig(.caption2)).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            .modifier(SelectionBubble(trip: selectedTrip))
         }
     }
 }
@@ -323,8 +328,8 @@ enum ScatterKind: Sendable {
     func x(_ t: Trip) -> Double { self == .temperature ? (t.tempC ?? 0) : (t.avgKmh ?? 0) }
     var note: String {
         self == .temperature
-            ? "Hver prik er en tur. Farven viser, om Maps ramte. Kulde giver mere varme og et koldere batteri."
-            : "Langsomme ture bruger mere pr. km om vinteren, fordi varmen kører, uanset hvor langt bilen kommer."
+            ? "Hver prik er en tur. Farven viser, om Maps ramte. Kulde giver mere varme og et koldere batteri. Træk hen over grafen for at se hver tur."
+            : "Hver prik er en tur. Langsomme ture bruger mere pr. km om vinteren, fordi varmen kører hele tiden, uanset hvor langt bilen kommer. Træk hen over grafen for at se hver tur."
     }
     var question: String {
         self == .temperature
@@ -351,7 +356,7 @@ private struct ScatterChart: View {
         let pad = max(1, (hi - lo) * 0.08)
         let full = (hi - lo) + 2 * pad
         let top = (trips.map(\.kwhPer100).max() ?? 30) * 1.15
-        ChartFrame(title: kind.title, symbol: kind.symbol, expanded: expanded,
+        ChartFrame(title: kind.title, symbol: kind.symbol, expanded: expanded, info: kind.note,
                    analysisQuestion: kind.question, analysisData: tripsDigest(trips),
                    full: { AnyView(ScatterChart(trips: trips, kind: kind, expanded: true)) }) {
             Chart {
@@ -385,15 +390,13 @@ private struct ScatterChart: View {
                 }
             }
             .frame(height: expanded ? 420 : 170)
+            .modifier(SelectionBubble(trip: selectedTrip))
             HStack(spacing: 12) {
                 ForEach([("Maps ramte", Color.green), ("brugte mere", Color.orange), ("brugte mindre", Color.blue)], id: \.0) { l in
                     HStack(spacing: 4) { Circle().fill(l.1).frame(width: 8, height: 8); Text(l.0) }
                 }
             }
             .font(.fig(.caption2)).foregroundStyle(.secondary)
-            SelectionLine(trip: selectedTrip, hint: expanded ? "Knib for at zoome, træk for at se hver tur" : "Træk hen over grafen for at se hver tur")
-            Text(kind.note).font(.fig(.caption2)).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

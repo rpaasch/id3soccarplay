@@ -14,20 +14,53 @@ import Charts
 struct Card<Content: View>: View {
     var title: String?
     var symbol: String?
+    /// The longer explanation, behind an ⓘ button in the title row instead of on the card.
+    var info: String?
     @ViewBuilder var content: Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let title {
-                Label(title, systemImage: symbol ?? "circle")
-                    .font(.fig(.subheadline, .semibold))
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Label(title, systemImage: symbol ?? "circle")
+                        .font(.fig(.subheadline, .semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    if let info { InfoButton(text: info) }
+                }
             }
             content
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+}
+
+/// A small ⓘ that shows an explanation in a popover, so the screens stay light.
+struct InfoButton: View {
+    let text: String
+    @State private var shown = false
+
+    var body: some View {
+        Button { shown = true } label: {
+            Image(systemName: "info.circle")
+                .font(.fig(.body))
+                .foregroundStyle(.secondary)
+                .frame(width: 30, height: 30)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Forklaring")
+        .accessibilityHint(text)
+        .popover(isPresented: $shown) {
+            Text(text)
+                .font(.fig(.callout))
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: 300, alignment: .leading)
+                .padding(16)
+                .presentationCompactAdaptation(.popover)
+        }
     }
 }
 
@@ -238,6 +271,7 @@ struct SpeedBinsChart: View {
             HStack {
                 Text(unit == .perKm ? "kWh pr. 100 km ved hver fart" : "kW, bilen bruger ved hver fart")
                     .font(.fig(.caption2)).foregroundStyle(.secondary)
+                InfoButton(text: note)
                 Spacer(minLength: 8)
                 Picker("Vis", selection: $unit) {
                     ForEach(Unit.allCases) { Text($0.rawValue).tag($0) }
@@ -267,9 +301,10 @@ struct SpeedBinsChart: View {
             .frame(height: 130)
             .animation(.easeInOut(duration: 0.25), value: unit)
             Text("km/t").font(.fig(.caption2)).foregroundStyle(.tertiary).frame(maxWidth: .infinity, alignment: .trailing)
-            Text(note)
-                .font(.fig(.caption2)).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            if coldW > 0 {
+                Label("Kold bil: +\(DK.num(coldW / 1000, 1)) kW de første 15 min", systemImage: "snowflake")
+                    .font(.fig(.caption2)).foregroundStyle(.cyan)
+            }
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(unit == .perKm
@@ -329,8 +364,8 @@ struct TripCard: View {
     private var verdict: String {
         guard trip.isCounted else {
             return trip.km < 20
-                ? "For kort til at tælle med – batteriet melder kun hele procent."
-                : "Tæller ikke med – forbruget ligger så langt fra det forventede, at målingen nok er forkert."
+                ? "For kort til at tælle med"
+                : "Tæller ikke med – målingen ser forkert ud"
         }
         let pct = Int(((trip.vsMaps - 1) * 100).rounded())
         switch trip.vsMaps {

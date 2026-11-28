@@ -128,7 +128,7 @@ struct ContentView: View {
                 }
                 if s.isCharging { chargingNowCard(s) }
                 if obd.power.count >= 2 {
-                    Card(title: "Batteriets effekt (donglen)", symbol: "bolt.horizontal") {
+                    Card(title: "Batteriets effekt", symbol: "bolt.horizontal", info: PowerChart.info) {
                         PowerChart(points: obd.power)
                     }
                 }
@@ -136,7 +136,9 @@ struct ContentView: View {
             } else {
                 Card { Text(liveNote).foregroundStyle(.secondary) }
             }
-            Text(liveNote).font(.fig(.footnote)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+            if live != nil, liveNote != "Hentet fra Workeren." {
+                Text(liveNote).font(.fig(.footnote)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 
@@ -212,11 +214,10 @@ struct ContentView: View {
 
     /// What Maps is told about consumption, in one card: per speed, then why.
     private func mapsCard(_ m: ModelHints) -> some View {
-        Card(title: "Det regner Maps med", symbol: "map") {
+        Card(title: "Det regner Maps med" + (m.temperatureC.map { " · \(DK.num($0, 0)) °C" } ?? ""), symbol: "map",
+             info: "Strømforbrug pr. 100 km med varme medregnet, som Apple Maps bruger til rækkevidde og ankomstprocent. " + mapsFootnote(m)) {
             let aux = m.auxPowerW ?? 500
             if let bins = m.consumptionBinsKwhPer100, bins.count == 10 {
-                Text("Strømforbrug pr. 100 km" + (m.temperatureC.map { " ved \(DK.num($0, 0)) °C ude" } ?? "") + ", varme medregnet:")
-                    .font(.fig(.callout)).foregroundStyle(.secondary)
                 HStack(spacing: 0) {
                     tile(DK.num(SpeedBinsChart.value(bins: bins, auxW: aux, index: 2), 0) + " kWh", "by, 50 km/t")
                     tile(DK.num(SpeedBinsChart.value(bins: bins, auxW: aux, index: 4), 0) + " kWh", "landevej, 90")
@@ -226,8 +227,6 @@ struct ContentView: View {
             } else if let k = m.consumptionKwhPer100 {
                 tile(DK.num(k) + " kWh", "pr. 100 km i snit")
             }
-            Text(mapsFootnote(m)).font(.fig(.caption)).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -261,8 +260,9 @@ struct ContentView: View {
                 Card { Text(tripsNote.isEmpty ? "Ingen ture endnu. En tur logges, når bilen har kørt mindst 5 km." : tripsNote).foregroundStyle(.secondary) }
             } else {
                 if let c = live?.model?.tripCalibration {
-                    Card(title: "Kalibrering", symbol: "dial.medium") {
-                        let pct = Int(((c.factor - 1) * 100).rounded())
+                    let pct = Int(((c.factor - 1) * 100).rounded())
+                    Card(title: "Kalibrering", symbol: "dial.medium",
+                         info: "Bilen bruger \(abs(pct)) % \(pct >= 0 ? "mere" : "mindre") strøm end ren fysik siger. Maps får forbruget ganget med dette tal. Det bygger på \(c.sourceText).") {
                         HStack(alignment: .center) {
                             Text("×" + DK.num(c.factor, 2))
                                 .font(.fig(size: 34, weight: .bold)).monospacedDigit()
@@ -272,9 +272,6 @@ struct ContentView: View {
                                 .padding(.horizontal, 10).padding(.vertical, 5)
                                 .background(Color(.tertiarySystemFill), in: Capsule())
                         }
-                        Text("Bilen bruger \(abs(pct)) % \(pct >= 0 ? "mere" : "mindre") strøm end ren fysik siger. Maps får forbruget ganget med dette tal. Det bygger på \(c.sourceText).")
-                            .font(.fig(.callout)).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 if !bands.isEmpty { bandsCard }
@@ -283,21 +280,26 @@ struct ContentView: View {
                               data: tripsDigest(trips.sorted { $0.start < $1.start }), allowsOwnQuestion: true)
                 let shown = Array(trips.prefix(20))
                 let scale = (shown.flatMap { [$0.kwhPer100, $0.mapsValue] }.max() ?? 30) * 1.05
-                ForEach(groupedByDay(shown)) { group in
-                    Text(group.day).font(.fig(.title3, .bold)).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
+                let days = groupedByDay(shown)
+                ForEach(days) { group in
+                    HStack {
+                        Text(group.day).font(.fig(.title3, .bold))
+                        Spacer()
+                        if group.id == days.first?.id {
+                            InfoButton(text: "Brugte = kWh pr. 100 km ud fra batteriets fald. Maps = det forbrug, Maps fik for samme fart og temperatur, med den kalibrering der gjaldt da. Ture under 20 km tæller ikke med, fordi batteriet kun melder hele procent.")
+                        }
+                    }
+                    .padding(.top, 6)
                     ForEach(group.trips) { TripCard(trip: $0, scale: scale) }
                 }
-                Text("Brugte = kWh pr. 100 km ud fra batteriets fald. Maps = det forbrug, Maps fik for samme fart og temperatur, med den kalibrering der gjaldt da. Ture under 20 km tæller ikke med, fordi batteriet melder i hele procent.")
-                    .font(.fig(.footnote)).foregroundStyle(.secondary)
             }
         }
     }
 
     /// Every 5 °C band the car has been driven or charged in: its own factor and charge-curve status.
     private var bandsCard: some View {
-        Card(title: "Temperaturbånd", symbol: "thermometer.snowflake") {
-            Text("Bilen bruger forskelligt efter temperaturen. Hvert bånd husker sine egne seneste 15 ture, så vinteren stadig er kendt til foråret. Maps bruger båndet for dagens temperatur.")
-                .font(.fig(.caption)).foregroundStyle(.secondary)
+        Card(title: "Temperaturbånd", symbol: "thermometer.snowflake",
+             info: "Bilen bruger forskelligt efter temperaturen. Hvert bånd på 5 °C husker sine egne seneste 15 ture, så vinteren stadig er kendt til foråret. Maps bruger båndet for dagens temperatur.") {
                 .fixedSize(horizontal: false, vertical: true)
             VStack(spacing: 2) {
                 ForEach(bands) { b in bandRow(b) }
@@ -353,9 +355,8 @@ struct ContentView: View {
             if let p = profile {
                 let m = live?.model
                 let points = curvePoints(profile: p, hints: m)
-                Card(title: "Sådan regner Maps med, at bilen lader", symbol: "chart.xyaxis.line") {
-                    Text("Kurven viser, hvor mange kW bilen tager imod ved hver batteriprocent på en hurtiglader. Maps bruger den til at regne ladetid og ladestop ud.")
-                        .font(.fig(.callout)).foregroundStyle(.secondary)
+                Card(title: "Ladekurven Maps bruger", symbol: "chart.xyaxis.line",
+                     info: "Kurven viser, hvor mange kW bilen tager imod ved hver batteriprocent på en hurtiglader. Maps bruger den til at regne ladetid og ladestop ud. " + chargeConditions(m)) {
                     if points.isEmpty {
                         Text("Ingen kurve.").foregroundStyle(.secondary)
                     } else {
@@ -391,23 +392,21 @@ struct ContentView: View {
                             if let peak = points.map(\.kw).max() { stat("højeste effekt", "\(Int(peak.rounded())) kW") }
                         }
                         .padding(.top, 4)
-                        Text(chargeConditions(m))
-                            .font(.fig(.caption)).foregroundStyle(.secondary)
                     }
                 }
                 if let m {
-                    Card(title: "Det har appen lært", symbol: "brain") {
+                    Card(title: "Det har appen lært", symbol: "brain",
+                         info: "Appen lærer automatisk, hver gang bilen hurtiglader. Varmt batteri (lige efter kørsel) og koldt batteri læres hver for sig, fordi et koldt batteri lader langsommere. Hvert temperaturbånd har sin egen kurve; Maps får den, der passer til vejret og batteriet lige nu (den fede linje). Mangler den, låner appen fra den nærmeste temperatur.") {
                         let curve = m.chargeCurveKw ?? []
                         let learned = curve.compactMap { $0 }.count
                         if learned > 0 {
-                            Text("\(learned) af \(max(curve.count, 11)) punkter på kurven er målt ved dine egne hurtigladninger med \(m.chargeCurveWarm == true ? "varmt" : "koldt") batteri (\(m.chargeSessions ?? 0) \((m.chargeSessions ?? 0) == 1 ? "ladning" : "ladninger") i alt). Resten er standardkurven.")
+                            Text("\(learned) af \(max(curve.count, 11)) punkter målt · \(m.chargeSessions ?? 0) \((m.chargeSessions ?? 0) == 1 ? "ladning" : "ladninger") · \(m.chargeCurveWarm == true ? "varmt" : "koldt") batteri")
                                 .font(.fig(.callout))
                             if let gaps = missingRanges(curve) {
-                                Text("Mangler stadig: \(gaps). De punkter lærer appen, næste gang du lader i det område.")
-                                    .font(.fig(.caption)).foregroundStyle(.secondary)
+                                Text("Mangler: \(gaps)").font(.fig(.caption)).foregroundStyle(.secondary)
                             }
                         } else {
-                            Text("Der er endnu ingen målinger ved den temperatur. Maps bruger standardkurven, indtil du har hurtigladet.")
+                            Text("Ingen målinger ved den temperatur endnu – Maps bruger standardkurven.")
                                 .font(.fig(.callout))
                         }
                         if let all = m.chargeCurves, !all.isEmpty {
@@ -417,8 +416,6 @@ struct ContentView: View {
                         if let c = m.capacityKwhNet {
                             KeyValue(key: "Brugbart batteri", value: "\(Int(c)) kWh")
                         }
-                        Text("Appen lærer automatisk, hver gang bilen hurtiglader. Varmt batteri (lige efter kørsel) og koldt batteri læres hver for sig, fordi et koldt batteri lader langsommere.")
-                            .font(.fig(.caption)).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -521,7 +518,7 @@ struct ContentView: View {
         } header: {
             Text("OBD-dongle")
         } footer: {
-            Text("Donglen taler kun med bilen, mens CarPlay er forbundet (genvejene Start/Slut kørsel). Når CarPlay afbryder, stopper den med det samme, så den aldrig taler med en låst bil. Den spørger kun bilen, mens bilen kører (GPS over ca. 5 km/t), så der er stille, når du holder, stiger ud og låser. Den kræver derfor GPS slået til. Den spørger desuden først, når donglens egen 12 V-måling viser, at bilen er tændt (over 13 V). Den stopper til næste tur, hvis spændingen falder (bilen slukkes), eller hvis bilen ikke svarer to gange i træk. Den kan kun læse, aldrig ændre noget.")
+            Text("Kun læsning, kun mens bilen kører med CarPlay og er tændt (over 13 V). Stopper straks, når CarPlay afbryder.")
         }
     }
 
@@ -537,7 +534,7 @@ struct ContentView: View {
                 row("Optager nu", GPSRecorder.shared.isRecording ? "ja" : "nej")
                 if !gpsNote.isEmpty { Text(gpsNote).font(.fig(.footnote)).foregroundStyle(.secondary) }
             }
-            Text("Positioner bliver på telefonen. Kun tid og km pr. fartinterval samt meter op og ned sendes til Workeren. Vælg \"Altid\" som placeringstilladelse, så turen måles uden at appen er åben.")
+            Text("Positioner bliver på telefonen. Vælg \"Altid\", så turen måles uden at appen er åben.")
                 .font(.fig(.footnote)).foregroundStyle(.secondary)
         }
     }
@@ -783,10 +780,10 @@ private struct LearnedCurvesView: View {
                 }
                 .accessibilityElement(children: .combine)
             }
-            Text(active == nil
-                 ? "Ingen af kurverne passer til vejret lige nu, så Maps bruger standardkurven."
-                 : "Maps får den fede kurve: den, der passer til temperaturen og batteriet lige nu. Mangler den, låner appen fra den nærmeste temperatur.")
-                .font(.fig(.caption)).foregroundStyle(.secondary)
+            if active == nil {
+                Text("Ingen kurve passer til vejret lige nu – Maps bruger standardkurven.")
+                    .font(.fig(.caption)).foregroundStyle(.secondary)
+            }
         }
     }
 
