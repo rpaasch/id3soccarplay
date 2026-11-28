@@ -171,9 +171,6 @@ extension VehicleProfile {
         }
     }
 
-    /// Extra consumption factor for Maps only (see `adjusted`). 2-3 pp missed of ~17 pp ≈ +15 %.
-    static let mapsConsumptionBias = 1.15
-
     /// Returns the adapted profile and a one-line description for the log.
     func adjusted(with hints: ModelHints?) -> (profile: VehicleProfile, note: String) {
         guard let hints else { return (self, "baseline profile (no model hints)") }
@@ -202,12 +199,20 @@ extension VehicleProfile {
         }
         if let bins = hints.consumptionBinsKwhPer100, bins.count == 10 {
             // kWh/100 km -> Wh per metre is /100.
-            consumptionParams = consumptionParams.replacingArray(
-                "vehicle_consumption_values_wh_per_m", with: bins.map { min(0.6, max(0.05, $0 / 100)) })
-            if let aux = hints.auxPowerW, (200...4000).contains(aux) {
-                consumptionParams = consumptionParams.replacingNumber("vehicle_auxiliary_power_w", with: aux)
+            // Heating/aux power is folded into each speed bin (W / speed = Wh per metre) and the
+            // separate aux field is zeroed. Maps' arrival forecast started 2-3 pp too high on the
+            // commute and stepped down at every real SoC update (27 Nov) although the hints match
+            // the car: Maps evidently doesn't apply the aux field as modelled. Folded in, the
+            // total is the same whether Maps uses that field or not, and it still follows the
+            // live aux value (cold start, outdoor temperature) instead of a fixed factor.
+            let aux = hints.auxPowerW.map { min(4000, max(0, $0)) } ?? 500
+            let values = bins.enumerated().map { i, kwh100 -> Double in
+                let speedMs = Double(10 + 20 * i) / 3.6   // bin centres 10, 30, 50 … 190 km/h
+                return min(0.8, max(0.05, kwh100 / 100 + aux / speedMs / 3600))
             }
-            notes.append(String(format: "speed bins %@ (50: %.0f, 110: %.0f, 130: %.0f kWh/100km + aux %.0f W; mean %.1f)",
+            consumptionParams = consumptionParams.replacingArray("vehicle_consumption_values_wh_per_m", with: values)
+            consumptionParams = consumptionParams.replacingNumber("vehicle_auxiliary_power_w", with: 0)
+            notes.append(String(format: "speed bins %@ (50: %.0f, 110: %.0f, 130: %.0f kWh/100km + aux %.0f W folded in; mean %.1f)",
                                 hints.consumptionShapeMode ?? "?", bins[2], bins[5], bins[6],
                                 hints.auxPowerW ?? 500, hints.consumptionKwhPer100 ?? 0))
         } else if let implied = hints.consumptionKwhPer100,
@@ -221,17 +226,6 @@ extension VehicleProfile {
                 ? "learned over \(Int(hints.learnedKm ?? 0)) km" : "car estimate"
             notes.append(String(format: "consumption %.1f kWh/100km (x%.2f, ", implied, factor) + source + ")")
         }
-
-        // Maps drains its arrival forecast slower than the car: on the ~55 km commute it says
-        // 2-3 pp too much at arrival (of ~17 pp used) and steps down each time a real SoC comes
-        // in (27 Nov). The hints themselves match the car, so Maps uses them more optimistically
-        // than modelled. Lift everything Maps gets by the observed gap, aux power included.
-        let mapsBias = Self.mapsConsumptionBias
-        consumptionParams = consumptionParams.scalingArray("vehicle_consumption_values_wh_per_m", by: mapsBias)
-        if let aux = consumptionParams.fields["vehicle_auxiliary_power_w"], case .number(let w) = aux {
-            consumptionParams = consumptionParams.replacingNumber("vehicle_auxiliary_power_w", with: w * mapsBias)
-        }
-        notes.append(String(format: "Maps bias x%.2f", mapsBias))
 
         // Charging power: baseline is for ~6 °C; the Worker supplies the temperature scale.
         if let scale = hints.chargePowerScale {
