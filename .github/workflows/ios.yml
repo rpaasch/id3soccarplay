@@ -29,12 +29,24 @@ jobs:
     # Skipped for signed builds: adhoc compiles the same code anyway, and every extra macOS
     # job means another wait for a runner (two queued jobs were cancelled on 23 Nov).
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.sign) }}
-    runs-on: macos-latest
+    runs-on: xcode-27
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Select latest stable Xcode
-        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+        # iPhone Duo only runs an app edge to edge when it is built with the iOS 27.1 SDK or
+        # newer; older SDKs get letterboxed on the inner display. Prefer a released Xcode 27.
+        run: |
+          ls -d /Applications/Xcode*.app
+          XC=$(ls -d /Applications/Xcode_27*.app 2>/dev/null | grep -vi beta | sort -V | tail -1)
+          [ -n "$XC" ] || XC=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+          SDK=$(xcrun --sdk iphoneos --show-sdk-version)
+          echo "iOS SDK $SDK"
+          if [ "$(printf '%s\n27.1\n' "$SDK" | sort -V | head -1)" != "27.1" ]; then
+            echo "::warning::iOS SDK $SDK is older than 27.1 - iPhone Duo will letterbox the app"
+          fi
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate project
@@ -53,7 +65,7 @@ jobs:
   # with sign=true.
   adhoc:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.sign }}
-    runs-on: macos-latest
+    runs-on: xcode-27
     timeout-minutes: 40
     permissions:
       contents: read
@@ -70,7 +82,19 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Select latest stable Xcode
-        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+        # iPhone Duo only runs an app edge to edge when it is built with the iOS 27.1 SDK or
+        # newer; older SDKs get letterboxed on the inner display. Prefer a released Xcode 27.
+        run: |
+          ls -d /Applications/Xcode*.app
+          XC=$(ls -d /Applications/Xcode_27*.app 2>/dev/null | grep -vi beta | sort -V | tail -1)
+          [ -n "$XC" ] || XC=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+          SDK=$(xcrun --sdk iphoneos --show-sdk-version)
+          echo "iOS SDK $SDK"
+          if [ "$(printf '%s\n27.1\n' "$SDK" | sort -V | head -1)" != "27.1" ]; then
+            echo "::warning::iOS SDK $SDK is older than 27.1 - iPhone Duo will letterbox the app"
+          fi
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -130,6 +154,12 @@ jobs:
             PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
             OTHER_CODE_SIGN_FLAGS="--keychain $RUNNER_TEMP/build.keychain-db" \
             archive
+
+      - name: Show SDK stamp (iPhone Duo needs sdk 27.1+)
+        run: |
+          APP=$(ls -d "$RUNNER_TEMP/ID3Maps.xcarchive/Products/Applications/"*.app | head -1)
+          BIN="$APP/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
+          otool -l "$BIN" | grep -A4 LC_BUILD_VERSION | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Export Ad Hoc IPA
         run: |
