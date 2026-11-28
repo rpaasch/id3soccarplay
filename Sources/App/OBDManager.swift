@@ -239,6 +239,8 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var lastHuntReport = Date()
     /// Recent valid GPS speeds (m/s) for the acceleration of hunt samples.
     private var speedHist: [(t: Date, v: Double)] = []
+    /// Road-load energy (Wh) integrated from GPS speed since the app started (for the hunt).
+    private var roadEnergyWh = 0.0
     private var connectedAt = Date()
     /// Set when the car went silent during a drive: no reconnect until the next drive start.
     private var silentStop = false
@@ -260,6 +262,13 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             self.lastFixAt = t
             if valid && speed >= 0 {
                 self.lastSpeedKmh = speed * 3.6
+                if let last = self.speedHist.last {
+                    let dt = t.timeIntervalSince(last.t)
+                    if dt > 0, dt < 5 {
+                        let p = CurrentHunt.roadPowerW(v: (speed + last.v) / 2, a: (speed - last.v) / dt)
+                        self.roadEnergyWh += min(150_000, max(-60_000, p)) * dt / 3600
+                    }
+                }
                 self.speedHist.append((t, speed))
                 self.speedHist.removeAll { t.timeIntervalSince($0.t) > 8 }
             }
@@ -638,7 +647,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                     if isHunt {
                         let m = self.motionLocked()
                         self.hunt.record(did: did, payload: CurrentHunt.payload(reply: c, did: did),
-                                         speedMs: m?.v, accel: m?.a)
+                                         speedMs: m?.v, accel: m?.a, roadEnergyWh: self.roadEnergyWh)
                         if self.hunt.discoveryDone && !self.hunt.discoveryLogged {
                             self.hunt.discoveryLogged = true
                             self.log(self.hunt.respondersLine())

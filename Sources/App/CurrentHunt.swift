@@ -25,6 +25,11 @@ struct CurrentHunt: Codable {
         /// m/s and m/s².
         let v: Double
         let a: Double
+        /// Wall clock (s since 1970) and the road energy (Wh) integrated from GPS since the app
+        /// started, so pairs of samples give a mean road power over the interval. Optional: older
+        /// stored samples have neither.
+        var t: Double? = nil
+        var e: Double? = nil
     }
 
     static let range = 0x1E00...0x1EFF
@@ -88,12 +93,13 @@ struct CurrentHunt: Codable {
     }
 
     /// Records the result of one request. `payload` nil = no positive answer.
-    mutating func record(did: String, payload: String?, speedMs: Double?, accel: Double?) {
+    mutating func record(did: String, payload: String?, speedMs: Double?, accel: Double?,
+                         at time: Date = Date(), roadEnergyWh: Double? = nil) {
         guard let p = payload else { return }
         if responders[did] == nil { responders[did] = p.count / 2 }
         guard !p.isEmpty, let v = speedMs, let a = accel else { return }
         var list = samples[did] ?? []
-        list.append(Sample(hex: p, v: v, a: a))
+        list.append(Sample(hex: p, v: v, a: a, t: time.timeIntervalSince1970, e: roadEnergyWh))
         if list.count > Self.maxSamples { list.removeFirst(list.count - Self.maxSamples) }
         samples[did] = list
         if list.count >= 8, Set(list.map(\.hex)).count <= 1 { constant.insert(did) }
@@ -175,6 +181,49 @@ struct CurrentHunt: Codable {
         return out.sorted { abs($0.corrPower) > abs($1.corrPower) }
     }
 
+    struct RateFinding {
+        let did: String
+        let reading: String
+        let pairs: Int
+        let corr: Double
+        /// Value change per Wh of road energy (the counter's unit, if it is one).
+        let perWh: Double
+    }
+
+    /// Counters: a cumulative energy or charge counter does not follow the power itself, its
+    /// rate of change does. For consecutive samples of each identifier (2-400 s apart, same app
+    /// run) correlate the value's change per second with the mean road power over the same
+    /// interval. 1E3E (27/28 Nov) grew steadily from 137582 to 153541 and is the main suspect.
+    func rateFindings(minPairs: Int = 6) -> [RateFinding] {
+        var out: [RateFinding] = []
+        for did in trackedDIDs {
+            guard let list = samples[did], list.count >= minPairs + 1 else { continue }
+            let parsed = list.map { Self.readings($0.hex) }
+            guard let names = parsed.first?.map(\.0) else { continue }
+            var best: RateFinding?
+            for (i, name) in names.enumerated() {
+                var xs: [Double] = [], ys: [Double] = [], dvSum = 0.0, deSum = 0.0
+                for k in 1..<list.count {
+                    let a = list[k - 1], b = list[k]
+                    guard let ta = a.t, let tb = b.t, let ea = a.e, let eb = b.e else { continue }
+                    let dt = tb - ta, de = eb - ea
+                    guard dt >= 2, dt <= 400, de >= -50, de <= 2000,
+                          parsed[k - 1].count > i, parsed[k].count > i,
+                          parsed[k - 1][i].0 == name, parsed[k][i].0 == name else { continue }
+                    let dv = parsed[k][i].1 - parsed[k - 1][i].1
+                    xs.append(dv / dt); ys.append(de / dt * 3600)
+                    dvSum += dv; deSum += de
+                }
+                guard xs.count >= minPairs, let c = Self.pearson(xs, ys) else { continue }
+                let f = RateFinding(did: did, reading: name, pairs: xs.count, corr: c,
+                                    perWh: deSum != 0 ? dvSum / deSum : 0)
+                if best == nil || abs(c) > abs(best!.corr) { best = f }
+            }
+            if let b = best { out.append(b) }
+        }
+        return out.sorted { abs($0.corr) > abs($1.corr) }
+    }
+
     /// Log lines: progress plus the strongest candidates.
     func report(top: Int = 8) -> [String] {
         let total = Self.range.count
@@ -187,6 +236,10 @@ struct CurrentHunt: Codable {
             lines.append(String(format: "OBD hunt %@ %@: n %d, corr power %+.2f accel %+.2f speed %+.2f, %.0f…%.0f (raw %@…%@), %d values",
                                 f.did, f.reading, f.n, f.corrPower, f.corrAccel, f.corrSpeed,
                                 f.minValue, f.maxValue, f.minHex, f.maxHex, f.distinct))
+        }
+        for r in rateFindings().prefix(5) {
+            lines.append(String(format: "OBD hunt rate %@ %@: %d pairs, change/s vs road power corr %+.2f, %.3f per Wh",
+                                r.did, r.reading, r.pairs, r.corr, r.perWh))
         }
         return lines
     }
