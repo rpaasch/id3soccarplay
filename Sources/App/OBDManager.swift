@@ -58,6 +58,8 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         // Extra battery values (unverified identifiers: raw bytes for analysis)
         var extras: [OBDExtra]
         var scanProgress: String?
+        /// Battery output (kW) from the energy counter during this drive, oldest first.
+        var power: [PowerPoint] = []
     }
 
     /// Asks the battery controller for ~180 data identifiers once and logs every positive answer,
@@ -154,6 +156,7 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private func disconnectLocked(reason: String) {
         timer?.cancel(); timer = nil
         hunt.save()
+        endEnergyDriveLocked()
         central?.stopScan()
         if let p = peripheral, p.state != .disconnected {
             central?.cancelPeripheralConnection(p)
@@ -310,7 +313,8 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                calibration: { let c = calibration(); return String(format: "vist = %.3f × BMS %+.2f (%d sammenligninger)", c.slope, c.intercept, c.pairs) }(),
                decoded: decodedLocked.map { OBDDecoded(label: $0.0, value: $0.1) },
                firmware: firmware, volt12: volt12, lastAnswer: lastAnswer, okCount: okCount, failCount: failCount,
-               extras: Self.extraDIDs.compactMap { d in extras[d].map { OBDExtra(did: d, hex: $0) } }, scanProgress: scanProgress)
+               extras: Self.extraDIDs.compactMap { d in extras[d].map { OBDExtra(did: d, hex: $0) } }, scanProgress: scanProgress,
+               power: powerSeries)
     }
 
     private func log(_ s: String) { SharedLog.shared.log(s, category: "obd") }
@@ -625,7 +629,11 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             } else {
                 let did: String
                 let isHunt: Bool
-                if slot == 8 {
+                if slot == 5 || slot == 11 {
+                    did = "1E2D"; isHunt = false         // energy counter, every 15 s
+                } else if slot == 14 {
+                    did = "1E2C"; isHunt = false         // second counter, every 30 s
+                } else if slot == 8 {
                     let rest = Self.extraDIDs.filter { $0 != "1E3B" && $0 != "1E3D" }
                     did = rest[self.restIndex % rest.count]
                     self.restIndex += 1
@@ -643,6 +651,9 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                         self.extras[did] = String(c[r.upperBound...].prefix(16))
                         if did == "1E3B" { self.voltsAt = Date() }
                         if did == "1E3D" { self.addPowerSampleLocked() }
+                        if Self.energyDIDs.contains(did), let raw = Int(c[r.upperBound...].prefix(4), radix: 16) {
+                            self.recordEnergyLocked(did: did, raw: raw)
+                        }
                     }
                     if isHunt {
                         let m = self.motionLocked()
@@ -850,8 +861,73 @@ final class OBDManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         powerWin = PowerWindow()
     }
 
+    // MARK: Energy counters (1E2D / 1E2C)
+
+    static let energyDIDs = ["1E2D", "1E2C"]
+    private var counters: [String: EnergyCounter] = EnergyCounter.load()
+    private var powerSeries: [PowerPoint] = []
+    private var energyWin: [String: (counts: Double, dt: Double, n: Int)] = [:]
+    private var energyWinStart = Date()
+    private var lastPowerKw: Double?
+
+    private var capacityWh: Double {
+        let kwh = (SharedStore.codable(.lastState) as VehicleState?)?.model?.capacityKwhNet ?? 77
+        return (40...100).contains(kwh) ? kwh * 1000 : 77_000
+    }
+
+    private func recordEnergyLocked(did: String, raw: Int) {
+        var c = counters[did] ?? EnergyCounter(did: did)
+        let now = Date()
+        if let step = c.record(raw: raw, at: now, socPct: lastSocPct) {
+            var w = energyWin[did] ?? (0, 0, 0)
+            w.counts += step.counts; w.dt += step.dt; w.n += 1
+            energyWin[did] = w
+            if did == "1E2D", let s = c.whPerCount(socNow: lastSocPct, capacityWh: capacityWh) {
+                let kw = step.counts * s / step.dt * 3.6
+                lastPowerKw = kw
+                powerSeries.append(PowerPoint(at: now, kw: kw))
+                powerSeries.removeAll { now.timeIntervalSince($0.at) > 45 * 60 }
+            }
+        }
+        counters[did] = c
+        guard now.timeIntervalSince(energyWinStart) >= 60 else { return }
+        for d in Self.energyDIDs {
+            guard let w = energyWin[d], w.dt > 0, let k = counters[d] else { continue }
+            var line = String(format: "OBD energy %@: %.1f counts/min (%d reads)", d, w.counts / w.dt * 60, w.n)
+            if let s = k.whPerCount(socNow: lastSocPct, capacityWh: capacityWh) {
+                line += String(format: " = %.1f kW · drive %.2f kWh · %.2f Wh/count (%d drives)",
+                               w.counts * s / w.dt * 3.6, k.driveCounts * s / 1000, s, k.drives)
+            } else {
+                line += String(format: " · drive %.0f counts · scale not learnt yet (needs a 2 %% SoC drop)", k.driveCounts)
+            }
+            if let v = lastSpeedKmh, let f = lastFixAt, now.timeIntervalSince(f) < 10 { line += String(format: " · %.0f km/t", v) }
+            if let p = lastSocPct { line += String(format: " · SoC %.1f %%", p) }
+            log(line)
+        }
+        energyWin = [:]
+        energyWinStart = now
+        EnergyCounter.save(counters)
+    }
+
+    private func endEnergyDriveLocked() {
+        for d in Self.energyDIDs {
+            guard var c = counters[d] else { continue }
+            if let line = c.endDrive(socPct: lastSocPct, capacityWh: capacityWh) { log(line) }
+            counters[d] = c
+        }
+        EnergyCounter.save(counters)
+    }
+
     var decodedLocked: [(String, String)] {
         var out: [(String, String)] = []
+        if let c = counters["1E2D"] {
+            if let s = c.whPerCount(socNow: lastSocPct, capacityWh: capacityWh) {
+                if let kw = lastPowerKw { out.append(("Batteriets effekt (tæller)", String(format: "%.1f kW", kw))) }
+                out.append(("Brugt denne tur (tæller)", String(format: "%.2f kWh · %.2f Wh pr. tæl", c.driveCounts * s / 1000, s)))
+            } else if c.startSocPct != nil {
+                out.append(("Energitæller", String(format: "%.0f tæl denne tur – skalaen læres, når batteriet er faldet 2 %%", c.driveCounts)))
+            }
+        }
         let temps = Self.tempDIDs.compactMap { extras[$0] }.compactMap { u($0, bytes: 2) }.map { $0 / 64 - 40 }
         if !temps.isEmpty {
             let avg = temps.reduce(0, +) / Double(temps.count)

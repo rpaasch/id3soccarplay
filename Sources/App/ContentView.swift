@@ -125,6 +125,11 @@ struct ContentView: View {
                     chips(for: s)
                 }
                 if s.isCharging { chargingNowCard(s) }
+                if obd.power.count >= 2 {
+                    Card(title: "Batteriets effekt (donglen)", symbol: "bolt.horizontal") {
+                        PowerChart(points: obd.power)
+                    }
+                }
                 if let m = s.model { mapsCard(m) }
             } else {
                 Card { Text(liveNote).foregroundStyle(.secondary) }
@@ -272,6 +277,7 @@ struct ContentView: View {
                     }
                 }
                 if !bands.isEmpty { bandsCard }
+                TripCharts(trips: trips)
                 let shown = Array(trips.prefix(20))
                 let scale = (shown.flatMap { [$0.kwhPer100, $0.mapsValue] }.max() ?? 30) * 1.05
                 ForEach(groupedByDay(shown)) { group in
@@ -503,6 +509,7 @@ struct ContentView: View {
                 if let p = obd.lastSocPct { row("Batteri (live)", DK.num(p) + " %") }
                 row("Kontrolleret mod VW", obd.validated ? "ja" : "ikke endnu")
                 ForEach(obd.decoded) { d in row(d.label, d.value) }
+                if obd.power.count >= 2 { PowerChart(points: obd.power).padding(.vertical, 4) }
                 if let v = obd.volt12 { row("12 V-batteri", v) }
                 if let t = obd.lastAnswer { row("Sidste svar", t.formatted(date: .omitted, time: .standard)) }
                 if let c = obd.calibration { Text("Kalibrering: \(c)").font(.caption).foregroundStyle(.secondary) }
@@ -576,8 +583,11 @@ struct ContentView: View {
     /// While the app is open: refetch every 60 s (every 30 s while charging).
     private func liveLoop() async {
         while !Task.isCancelled {
-            try? await Task.sleep(for: .seconds(live?.isCharging == true ? 30 : 60))
+            // While the dongle is drawing the power chart, refresh it every 15 s.
+            let fast = live?.isCharging == true || !obd.power.isEmpty
+            try? await Task.sleep(for: .seconds(fast ? 15 : 60))
             if Task.isCancelled { return }
+            obd = OBDManager.shared.status()
             await Task { await refreshLive() }.value
         }
     }
