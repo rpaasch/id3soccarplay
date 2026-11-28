@@ -31,6 +31,10 @@ struct ContentView: View {
     @State private var gpsNote = ""
     /// Regular on wide screens: the foldable iPhone's inner display, landscape on big phones, iPad.
     @Environment(\.horizontalSizeClass) private var sizeClass
+    /// The window's real width in points. The foldable's inner display may still report a
+    /// compact size class, so the layout decides on width (>= 700 pt = wide).
+    @State private var windowWidth: CGFloat = 0
+    private var wide: Bool { sizeClass == .regular || windowWidth >= 700 }
 
     var body: some View {
         TabView {
@@ -44,9 +48,24 @@ struct ContentView: View {
                 .tabItem { Label("Mere", systemImage: "gearshape") }
         }
         .tint(.teal)
+        .background(GeometryReader { g in
+            Color.clear
+                .onAppear { noteWindow(g.size) }
+                .onChange(of: g.size) { _, new in noteWindow(new) }
+        })
         .onAppear { reload(); Task { await refreshLive() } }
         .task { await liveLoop() }
         .sheet(item: $exportFile) { file in ShareSheet(items: [file.url]) }
+    }
+
+    private func noteWindow(_ size: CGSize) {
+        guard abs(size.width - windowWidth) >= 1 else { return }
+        windowWidth = size.width
+        let cls = sizeClass == .regular ? "regular" : sizeClass == .compact ? "compact" : "?"
+        let screen = UIScreen.main.bounds.size
+        SharedLog.shared.log(String(format: "window %.0f x %.0f pt (screen %.0f x %.0f, scale %.1f), width class %@ -> %@",
+                                    size.width, size.height, screen.width, screen.height, UIScreen.main.scale,
+                                    cls, wide ? "columns" : "one column"), category: "app")
     }
 
     // MARK: Tabs
@@ -55,11 +74,11 @@ struct ContentView: View {
     /// into columns of at least 380 pt; pages that read top to bottom (`grid: false`, e.g. trips
     /// grouped by day) keep one column but at a readable width instead of stretching edge to edge.
     @ViewBuilder private func pageLayout<C: View>(grid: Bool, @ViewBuilder _ content: () -> C) -> some View {
-        if sizeClass == .regular && grid {
+        if wide && grid {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 380), spacing: 14, alignment: .top)],
                       alignment: .leading, spacing: 14) { content() }
                 .padding(.horizontal, 20).padding(.vertical, 12)
-        } else if sizeClass == .regular {
+        } else if wide {
             VStack(spacing: 14) { content() }
                 .frame(maxWidth: 760)
                 .padding(.horizontal, 20).padding(.vertical, 12)
