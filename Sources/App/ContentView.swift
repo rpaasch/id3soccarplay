@@ -300,7 +300,6 @@ struct ContentView: View {
     private var bandsCard: some View {
         Card(title: "Temperaturbånd", symbol: "thermometer.snowflake",
              info: "Bilen bruger forskelligt efter temperaturen. Hvert bånd på 5 °C husker sine egne seneste 15 ture, så vinteren stadig er kendt til foråret. Maps bruger båndet for dagens temperatur.") {
-                .fixedSize(horizontal: false, vertical: true)
             VStack(spacing: 2) {
                 ForEach(bands) { b in bandRow(b) }
             }
