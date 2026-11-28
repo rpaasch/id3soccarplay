@@ -279,6 +279,8 @@ struct ContentView: View {
                 }
                 if !bands.isEmpty { bandsCard }
                 TripCharts(trips: trips)
+                AnalysisPanel(question: "Giv et overblik over mine ture: forbrug, hvor godt Maps rammer, og hvad der påvirker forbruget mest.",
+                              data: tripsDigest(trips.sorted { $0.start < $1.start }), allowsOwnQuestion: true)
                 let shown = Array(trips.prefix(20))
                 let scale = (shown.flatMap { [$0.kwhPer100, $0.mapsValue] }.max() ?? 30) * 1.05
                 ForEach(groupedByDay(shown)) { group in
