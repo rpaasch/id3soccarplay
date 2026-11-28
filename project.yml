@@ -41,8 +41,6 @@ targets:
       - path: Sources/Shared
       - path: Resources/id3.json
         buildPhase: resources
-      - path: Resources/Fonts
-        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.porsche.one
@@ -83,8 +81,6 @@ targets:
           - Info.plist
           - Widget.entitlements
       - path: Sources/Shared
-      - path: Resources/Fonts
-        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.porsche.one.widget

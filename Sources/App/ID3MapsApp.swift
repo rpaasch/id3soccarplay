@@ -13,7 +13,6 @@ struct ID3MapsApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
-        Figtree.styleBars()
         NetworkLog.shared.start()
         CarPlayRoute.shared.start()
         SharedLog.shared.log("App launched (build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))", category: "app")

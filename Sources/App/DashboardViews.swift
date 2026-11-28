@@ -209,7 +209,9 @@ struct SpeedBinsChart: View {
             }
             .chartForegroundStyleScale([Self.drivingLabel: Color.teal, Self.heatingLabel: Color.orange,
                                         Self.coldLabel: Color.orange.opacity(0.45)])
-            .chartLegend(position: .top, alignment: .leading, spacing: 6)
+            .chartLegend(position: .top, alignment: .leading, spacing: 10)
+            // Headroom above the tallest bar so its number never runs into the legend.
+            .chartYScale(domain: 0...((parts.map(\.total).max() ?? 1) * 1.2))
             .chartYAxis(.hidden)
             .chartXAxis {
                 AxisMarks { _ in AxisValueLabel().font(.fig(.caption2)) }
