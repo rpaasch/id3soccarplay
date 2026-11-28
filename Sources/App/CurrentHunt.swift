@@ -42,13 +42,25 @@ struct CurrentHunt: Codable {
 
     var discoveryDone: Bool { nextDiscovery == nil }
 
+    /// Identifiers worth tracking. The 27 Nov discovery found 155 answering, of which 1E40…1EBD
+    /// are ~126 two-byte values in a row (cell voltages / temperatures, not a pack current) and
+    /// 1E05…1E29 one-byte values. Spread over all 155, each got only ~7 samples per drive and no
+    /// report came out. A pack current needs at least 2 bytes with a sign, so track the
+    /// multi-byte values plus the 2-byte ones before the cell block.
+    var trackedDIDs: [String] {
+        let focus = responders.filter { did, len in
+            !constant.contains(did) && (len >= 3 || (len == 2 && did < "1E40"))
+        }.keys.sorted()
+        return focus.isEmpty ? responders.keys.filter { !constant.contains($0) }.sorted() : focus
+    }
+
     /// The identifier to read next.
     mutating func nextDID() -> String? {
         if let n = nextDiscovery {
             nextDiscovery = n < Self.range.upperBound ? n + 1 : nil
             return String(format: "%04X", n)
         }
-        let active = responders.keys.filter { !constant.contains($0) }.sorted()
+        let active = trackedDIDs
         guard !active.isEmpty else { return nil }
         trackIndex = (trackIndex + 1) % active.count
         return active[trackIndex]
@@ -139,9 +151,10 @@ struct CurrentHunt: Codable {
     }
 
     /// Best reading per identifier, strongest power correlation first.
-    func findings(minSamples: Int = 12) -> [Finding] {
+    func findings(minSamples: Int = 8) -> [Finding] {
         var out: [Finding] = []
-        for (did, list) in samples where list.count >= minSamples && !constant.contains(did) {
+        let tracked = Set(trackedDIDs)
+        for (did, list) in samples where list.count >= minSamples && tracked.contains(did) {
             let power = list.map { Self.roadPowerW(v: $0.v, a: $0.a) }
             let accel = list.map(\.a), speed = list.map(\.v)
             let parsed = list.map { Self.readings($0.hex) }
@@ -163,12 +176,13 @@ struct CurrentHunt: Codable {
     }
 
     /// Log lines: progress plus the strongest candidates.
-    func report(top: Int = 6) -> [String] {
+    func report(top: Int = 8) -> [String] {
         let total = Self.range.count
         let asked = nextDiscovery.map { $0 - Self.range.lowerBound } ?? total
-        let tracked = responders.count - constant.count
-        var lines = [String(format: "OBD current hunt: %d/%d asked, %d answer, %d change, %d samples",
-                            asked, total, responders.count, tracked, samples.values.reduce(0) { $0 + $1.count })]
+        let tracked = trackedDIDs
+        let minN = tracked.map { samples[$0]?.count ?? 0 }.min() ?? 0
+        var lines = [String(format: "OBD current hunt: %d/%d asked, %d answer, tracking %d (min %d samples each), %d constant",
+                            asked, total, responders.count, tracked.count, minN, constant.count)]
         for f in findings().prefix(top) {
             lines.append(String(format: "OBD hunt %@ %@: n %d, corr power %+.2f accel %+.2f speed %+.2f, %.0f…%.0f (raw %@…%@), %d values",
                                 f.did, f.reading, f.n, f.corrPower, f.corrAccel, f.corrSpeed,
